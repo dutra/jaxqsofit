@@ -1,0 +1,68 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install package and test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-cov
+
+      - name: Run unit tests with coverage
+        run: |
+          pytest -q tests -m "not integration" \
+            --cov=src/jaxqsofit \
+            --cov-report=term-missing \
+            --cov-report=xml
+
+      - name: Upload coverage xml
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  integration:
+    # Manual only (network/astroquery dependent)
+    if: github.event_name == 'workflow_dispatch'
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install package and integration deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest astroquery
+
+      - name: Run integration tests
+        run: |
+          pytest -q tests -m integration
