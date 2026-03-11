@@ -18,6 +18,7 @@ from numpyro.optim import optax_to_numpyro
 
 from .defaults import build_default_prior_config
 from .model import (
+    C_KMS,
     _extract_line_table_from_prior_config,
     _get_sfd_query,
     _normalize_template_flux,
@@ -801,6 +802,54 @@ class QSOFit:
             return -1.
         return float(comp / total)
 
+    def line_profile_from_components(self, line_key: str) -> np.ndarray:
+        """Build a line-only profile from fitted Gaussian components by name prefix."""
+        if not hasattr(self, 'wave') or len(self.wave) == 0:
+            return np.array([], dtype=float)
+        if not hasattr(self, 'tied_line_meta'):
+            return np.zeros_like(self.wave, dtype=float)
+        if not hasattr(self, 'line_component_amp_median'):
+            return np.zeros_like(self.wave, dtype=float)
+
+        names = np.asarray(self.tied_line_meta.get('names', []))
+        amp = np.asarray(getattr(self, 'line_component_amp_median', []), dtype=float)
+        mu = np.asarray(getattr(self, 'line_component_mu_median', []), dtype=float)
+        sig = np.asarray(getattr(self, 'line_component_sig_median', []), dtype=float)
+        if names.size == 0 or amp.size == 0 or mu.size == 0 or sig.size == 0:
+            return np.zeros_like(self.wave, dtype=float)
+
+        keep = np.array([str(n).startswith(f'{line_key}_') for n in names], dtype=bool)
+        if not np.any(keep):
+            return np.zeros_like(self.wave, dtype=float)
+
+        lnw = np.log(np.asarray(self.wave, dtype=float))
+        prof = np.zeros_like(lnw)
+        for a, m, s in zip(amp[keep], mu[keep], sig[keep]):
+            if np.isfinite(a) and np.isfinite(m) and np.isfinite(s) and s > 0:
+                prof += a * np.exp(-0.5 * ((lnw - m) / s) ** 2)
+        return prof
+
+    def line_props_from_profile(self, wave: np.ndarray, profile: np.ndarray) -> tuple[float, float]:
+        """Return `(fwhm_kms, integrated_area)` from a line profile on `wave`."""
+        p = np.asarray(profile, dtype=float)
+        w = np.asarray(wave, dtype=float)
+        if p.size == 0 or w.size == 0 or p.size != w.size:
+            return np.nan, np.nan
+        if not np.any(np.isfinite(p)) or np.nanmax(p) <= 0:
+            return np.nan, np.nan
+
+        ipeak = int(np.nanargmax(p))
+        peak_lam = w[ipeak]
+        half = 0.5 * p[ipeak]
+        idx = np.where(p >= half)[0]
+        area = float(np.trapezoid(np.clip(p, 0.0, None), w))
+        if idx.size < 2 or not np.isfinite(peak_lam) or peak_lam <= 0:
+            return np.nan, area
+
+        fwhm_a = w[idx[-1]] - w[idx[0]]
+        fwhm_kms = C_KMS * fwhm_a / peak_lam
+        return float(fwhm_kms), area
+
     def save_result(self, conti_result, conti_result_type, conti_result_name, line_result, line_result_type, line_result_name, save_fits_name):
         """Write continuum+line summary table to a pandas CSV file."""
         self.all_result = np.concatenate([conti_result, line_result])
@@ -848,6 +897,21 @@ class QSOFit:
                     out.append((f'{name}[{i}]', arr2[:, i]))
         return out
 
+    @staticmethod
+    def _style_axis(ax, spine_lw=1.5):
+        """Apply consistent axis styling: ticks on all sides, no grid, thicker spines."""
+        ax.grid(False)
+        ax.tick_params(
+            which='both',
+            direction='in',
+            top=True,
+            right=True,
+            length=6,
+            width=1.2,
+        )
+        for spine in ax.spines.values():
+            spine.set_linewidth(spine_lw)
+
     def plot_trace(self, param_names=None, max_vector_elems=2, save_fig_path='.', save_fig_name=None):
         """Plot posterior trace series for selected parameters."""
         series = self._posterior_series(param_names=param_names, max_vector_elems=max_vector_elems)
@@ -861,7 +925,7 @@ class QSOFit:
         for ax, (label, vals) in zip(axes, series):
             ax.plot(np.arange(len(vals)), vals, color='tab:blue', lw=0.8)
             ax.set_ylabel(label, fontsize=9)
-            ax.grid(alpha=0.2)
+            self._style_axis(ax)
         axes[-1].set_xlabel('Sample', fontsize=10)
         fig.suptitle(f'{self.sdss_name} Trace Plot', fontsize=14)
         fig.tight_layout()
@@ -906,6 +970,7 @@ class QSOFit:
                     ax.set_ylabel(labels[i], fontsize=8)
                 else:
                     ax.set_yticklabels([])
+                self._style_axis(ax)
         fig.suptitle(f'{self.sdss_name} Corner Plot', fontsize=14)
         fig.tight_layout()
         plt.show()
@@ -942,8 +1007,7 @@ class QSOFit:
                 'PL': 'orange',
                 'FeII': 'teal',
                 'Balmer_cont': 'y',
-                'continuum': 'darkorange',
-                'lines': 'crimson',
+                'lines': 'lightskyblue',
                 'conti_plus_lines': 'green',
             }
             for key, color in band_colors.items():
@@ -960,9 +1024,8 @@ class QSOFit:
         fe_total_model = self.f_fe_mgii_model + self.f_fe_balmer_model
         ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='FeII', zorder=5)
         ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer cont.', zorder=5)
-        ax.plot(self.wave, self.f_conti_model, color='darkorange', lw=1.5, label='continuum', zorder=5)
         if len(self.f_line_model) == len(self.wave):
-            ax.plot(self.wave, self.f_line_model, color='crimson', lw=1.2, label='lines', zorder=5)
+            ax.plot(self.wave, self.f_line_model, color='lightskyblue', lw=1.5, label='lines', zorder=5)
             ax.plot(self.wave, self.f_conti_model + self.f_line_model, color='green', lw=1.2, label='conti+lines', zorder=5)
 
         # Plot individual Gaussian line components: broad (*_br) in red, narrow in green.
@@ -972,7 +1035,7 @@ class QSOFit:
                 and hasattr(self, 'tied_line_meta')
                 and len(self.line_component_amp_median) > 0):
             lnwave = np.log(self.wave)
-            compnames = self.tied_line_meta.get('compnames', [''] * len(self.line_component_amp_median))
+            comp_labels = self.tied_line_meta.get('names', [''] * len(self.line_component_amp_median))
             drew_broad_label = False
             drew_narrow_label = False
             for i in range(len(self.line_component_amp_median)):
@@ -985,7 +1048,7 @@ class QSOFit:
                 # Keep component plotting consistent with polynomial correction if enabled.
                 if hasattr(self, 'f_poly_model') and len(self.f_poly_model) == len(prof):
                     prof = prof * self.f_poly_model
-                cname = str(compnames[i]).lower()
+                cname = str(comp_labels[i]).lower()
                 is_broad = cname.endswith('_br') or ('_br' in cname)
                 if is_broad:
                     lbl = 'broad comps' if not drew_broad_label else None
@@ -1010,6 +1073,33 @@ class QSOFit:
         else:
             ax.set_ylim(0, ylims[1])
 
+        # Mark common broad-line AGN transitions on the spectrum panel.
+        broad_line_markers = [
+            ("Ly$\\alpha$", 1215.67),
+            ("CIV", 1549.06),
+            ("CIII]", 1908.73),
+            ("MgII", 2798.75),
+            ("H$\\beta$", 4862.68),
+            ("H$\\alpha$", 6564.61),
+        ]
+        xlo, xhi = ax.get_xlim()
+        y_top = ax.get_ylim()[1]
+        for label, lam0 in broad_line_markers:
+            if xlo <= lam0 <= xhi:
+                ax.axvline(lam0, color="gray", ls="--", lw=0.8, alpha=0.35, zorder=1)
+                ax.text(
+                    lam0,
+                    y_top * 0.985,
+                    label,
+                    rotation=90,
+                    va="top",
+                    ha="center",
+                    fontsize=9,
+                    color="dimgray",
+                    alpha=0.9,
+                    zorder=7,
+                )
+
         if plot_residual and len(self.model_total) == len(self.wave) and ax_resid is not None:
             resid = self.flux - self.model_total
             ax_resid.plot(self.wave, resid, color='gray', ls='dotted', lw=1.0, zorder=2)
@@ -1020,15 +1110,16 @@ class QSOFit:
                 if np.isfinite(rlim) and rlim > 0:
                     ax_resid.set_ylim(-1.15 * rlim, 1.15 * rlim)
             ax_resid.set_ylabel('resid', fontsize=13)
-            ax_resid.grid(alpha=0.2)
+            self._style_axis(ax_resid)
 
         if plot_residual and ax_resid is not None:
             ax_resid.set_xlabel(r'$\lambda_{\mathrm{rest}}\ (\AA)$', fontsize=20)
         else:
             ax.set_xlabel(r'$\lambda_{\mathrm{rest}}\ (\AA)$', fontsize=20)
         ax.set_ylabel(r'$f_{\lambda}\ (10^{-17}\ \mathrm{erg}\ \mathrm{s}^{-1}\ \mathrm{cm}^{-2}\ \AA^{-1})$', fontsize=20)
+        self._style_axis(ax)
         if plot_legend:
-            ax.legend(frameon=False, fontsize=9, ncol=2)
+            ax.legend(frameon=True, framealpha=0.9, edgecolor='0.3', fontsize=9, ncol=2)
         plt.show()
         if self.save_fig:
             out_file = os.path.join(save_fig_path, self.sdss_name + '.pdf')

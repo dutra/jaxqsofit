@@ -46,13 +46,55 @@ DEFAULT_LINE_CONFIG: Dict[str, Any] = {
 }
 
 
+def _apply_robust_line_scale_priors(
+    line_rows: List[Dict[str, Any]],
+    fscale: float,
+    fmax: float,
+) -> List[Dict[str, Any]]:
+    """Apply flux-aware robust bounds/initialization to line-scale priors."""
+    if len(line_rows) == 0:
+        return line_rows
+
+    # Keep dynamic range positive even for nearly flat/noisy spectra.
+    delta = max(float(fmax - fscale), 0.1 * float(fscale), 1e-8)
+
+    for row in line_rows:
+        linename = str(row.get("linename", "")).lower()
+        is_broad = linename.endswith("_br") or ("_br" in linename)
+
+        maxsca = float(row.get("maxsca", np.inf))
+        minsca = float(row.get("minsca", 0.0))
+        inisca = float(row.get("inisca", 0.0))
+
+        # Broad lines get a tighter cap than narrow lines by default.
+        if is_broad:
+            max_cap = 1.0 * delta
+        else:
+            max_cap = 1.2 * delta
+        maxsca = min(maxsca, max_cap)
+
+        # Keep scales strictly positive and ordered.
+        mins_floor = max(minsca, 1e-4 * float(fscale), 1e-12)
+        maxsca = max(maxsca, 1.01 * mins_floor)
+        inisca = float(np.clip(inisca, mins_floor, maxsca))
+
+        row["minsca"] = mins_floor
+        row["maxsca"] = maxsca
+        row["inisca"] = inisca
+
+    return line_rows
+
+
 def build_default_prior_config(flux: np.ndarray, line_config: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Build a full prior_config with sane defaults from data flux scale."""
     f = np.asarray(flux, dtype=float)
     finite = np.isfinite(f)
     fscale = float(np.nanmedian(np.abs(f[finite]))) if np.any(finite) else 1.0
+    fmax = float(np.nanmax(np.abs(f[finite]))) if np.any(finite) else fscale
     if not np.isfinite(fscale) or fscale <= 0:
         fscale = 1.0
+    if not np.isfinite(fmax) or fmax <= 0:
+        fmax = fscale
 
     cfg: Dict[str, Any] = {
         "log_cont_norm": {"loc": np.log(max(fscale, 1e-8)), "scale": 0.3},
@@ -79,6 +121,11 @@ def build_default_prior_config(flux: np.ndarray, line_config: Dict[str, Any] | N
     }
 
     lc = copy.deepcopy(DEFAULT_LINE_CONFIG if line_config is None else line_config)
+    if isinstance(lc, dict):
+        line_cfg = lc.get("line", {})
+        if isinstance(line_cfg, dict):
+            table = line_cfg.get("table", None)
+            if isinstance(table, list):
+                line_cfg["table"] = _apply_robust_line_scale_priors(table, fscale=fscale, fmax=fmax)
     cfg.update(lc)
     return cfg
-
