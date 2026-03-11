@@ -776,19 +776,23 @@ class QSOFit:
             return -1.
         return float(comp / total)
 
-    def line_profile_from_components(self, line_key: str) -> np.ndarray:
-        """Build a line-only profile from fitted Gaussian components by name prefix."""
+    def _line_profile_from_params(
+        self,
+        line_key: str,
+        amp: np.ndarray,
+        mu: np.ndarray,
+        sig: np.ndarray,
+    ) -> np.ndarray:
+        """Build a line profile from explicit Gaussian parameter arrays."""
         if not hasattr(self, 'wave') or len(self.wave) == 0:
             return np.array([], dtype=float)
         if not hasattr(self, 'tied_line_meta'):
             return np.zeros_like(self.wave, dtype=float)
-        if not hasattr(self, 'line_component_amp_median'):
-            return np.zeros_like(self.wave, dtype=float)
 
         names = np.asarray(self.tied_line_meta.get('names', []))
-        amp = np.asarray(getattr(self, 'line_component_amp_median', []), dtype=float)
-        mu = np.asarray(getattr(self, 'line_component_mu_median', []), dtype=float)
-        sig = np.asarray(getattr(self, 'line_component_sig_median', []), dtype=float)
+        amp = np.asarray(amp, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+        sig = np.asarray(sig, dtype=float)
         if names.size == 0 or amp.size == 0 or mu.size == 0 or sig.size == 0:
             return np.zeros_like(self.wave, dtype=float)
 
@@ -803,10 +807,45 @@ class QSOFit:
                 prof += a * np.exp(-0.5 * ((lnw - m) / s) ** 2)
         return prof
 
-    def line_props_from_profile(self, wave: np.ndarray, profile: np.ndarray) -> tuple[float, float]:
-        """Return `(fwhm_kms, integrated_area)` from a line profile on `wave`."""
+    def line_profile_from_components(self, line_key: str) -> np.ndarray:
+        """Build a line-only profile from posterior-median Gaussian components."""
+        if not hasattr(self, 'line_component_amp_median'):
+            return np.zeros_like(self.wave, dtype=float)
+        return self._line_profile_from_params(
+            line_key=line_key,
+            amp=np.asarray(getattr(self, 'line_component_amp_median', []), dtype=float),
+            mu=np.asarray(getattr(self, 'line_component_mu_median', []), dtype=float),
+            sig=np.asarray(getattr(self, 'line_component_sig_median', []), dtype=float),
+        )
+
+    def line_profile_from_draw(self, draw_index: int, line_key: str) -> np.ndarray:
+        """Build a line-only profile for one posterior draw index."""
+        if not hasattr(self, 'pred_out') or self.pred_out is None:
+            return np.zeros_like(self.wave, dtype=float)
+        if 'line_amp_per_component' not in self.pred_out:
+            return np.zeros_like(self.wave, dtype=float)
+
+        amp_draws = np.asarray(self.pred_out['line_amp_per_component'])
+        mu_draws = np.asarray(self.pred_out['line_mu_per_component'])
+        sig_draws = np.asarray(self.pred_out['line_sig_per_component'])
+        if amp_draws.ndim != 2 or mu_draws.ndim != 2 or sig_draws.ndim != 2:
+            return np.zeros_like(self.wave, dtype=float)
+
+        idx = int(draw_index)
+        if idx < 0 or idx >= amp_draws.shape[0]:
+            raise IndexError(f'draw_index {idx} is out of bounds for {amp_draws.shape[0]} posterior draws')
+
+        return self._line_profile_from_params(
+            line_key=line_key,
+            amp=amp_draws[idx],
+            mu=mu_draws[idx],
+            sig=sig_draws[idx],
+        )
+
+    def line_props(self, profile: np.ndarray, wave: np.ndarray | None = None) -> tuple[float, float]:
+        """Return `(fwhm_kms, integrated_area)` from a line profile."""
         p = np.asarray(profile, dtype=float)
-        w = np.asarray(wave, dtype=float)
+        w = np.asarray(self.wave if wave is None else wave, dtype=float)
         if p.size == 0 or w.size == 0 or p.size != w.size:
             return np.nan, np.nan
         if not np.any(np.isfinite(p)) or np.nanmax(p) <= 0:
@@ -823,6 +862,10 @@ class QSOFit:
         fwhm_a = w[idx[-1]] - w[idx[0]]
         fwhm_kms = C_KMS * fwhm_a / peak_lam
         return float(fwhm_kms), area
+
+    def line_props_from_profile(self, wave: np.ndarray, profile: np.ndarray) -> tuple[float, float]:
+        """Compatibility wrapper for `line_props(profile, wave=wave)`."""
+        return self.line_props(profile=profile, wave=wave)
 
     def save_result(self, conti_result, conti_result_type, conti_result_name, line_result, line_result_type, line_result_name, save_fits_name):
         """Write continuum+line summary table to a pandas CSV file."""
