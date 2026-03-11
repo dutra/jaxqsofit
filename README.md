@@ -74,10 +74,9 @@ This repo assumes `dustmaps` is already configured and SFD maps are available.
 
 Typical one-time setup:
 
-```python setup.py fetch --map-name=sfd
 ```
-
-After this, `SFDQuery()` should work without further setup.
+python setup.py fetch --map-name=sfd
+```
 
 ## Repo layout
 
