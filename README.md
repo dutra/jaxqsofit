@@ -86,7 +86,7 @@ python setup.py fetch --map-name=sfd
 - `src/jaxqsofit/__init__.py` – package exports
 - `tests/` – test directory
 - `test.ipynb` – development/example notebook
-- `fe_uv.txt`, `fe_optical.txt` – Fe templates
+- `src/jaxqsofit/data/fe_uv.txt`, `src/jaxqsofit/data/fe_optical.txt` – Fe templates
 - `tempdata.h5` – DSPS SSP template file (example)
 - `data/spec-0332-52367-0639.csv` – example spectrum (`loglam`, `flux`, `ivar`)
 - `data/spec-0332-52367-0639-meta.csv` – example metadata (`z`, `ra`, `dec`, etc.)

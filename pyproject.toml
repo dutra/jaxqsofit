@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaxqsofit"
+version = "0.1.0"
+description = "Bayesian quasar spectral fitting with JAX + NumPyro"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "JaxQSOFit contributors" }
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "matplotlib",
+  "pandas",
+  "astropy",
+  "extinction",
+  "jax",
+  "jaxlib",
+  "numpyro",
+  "dsps",
+  "dustmaps",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jaxqsofit = ["data/*.txt"]

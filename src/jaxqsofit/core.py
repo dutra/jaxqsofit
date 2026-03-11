@@ -98,8 +98,9 @@ class QSOFit:
         self.Fe_flux_range = np.asarray(out_params.get('Fe_flux_range', []), dtype=float)
         self.L_conti_wave = np.asarray(out_params.get('cont_loc', []), dtype=float)
 
-        self.fe_uv = np.genfromtxt(os.path.join(self.install_path, 'fe_uv.txt'))
-        self.fe_op = np.genfromtxt(os.path.join(self.install_path, 'fe_optical.txt'))
+        data_dir = os.path.join(self.install_path, 'data')
+        self.fe_uv = np.genfromtxt(os.path.join(data_dir, 'fe_uv.txt'))
+        self.fe_op = np.genfromtxt(os.path.join(data_dir, 'fe_optical.txt'))
 
         self.fe_uv_wave = 10 ** self.fe_uv[:, 0]
         # Normalize non-negative template amplitudes to O(1) so Fe norms are in data-flux units.
@@ -178,8 +179,26 @@ class QSOFit:
                 fit_bc=fit_bc,
                 fit_poly=fit_poly,
             )
+        elif fit_method == 'optax+nuts':
+            self.run_fsps_optax_nuts_fit(
+                optax_steps=optax_steps,
+                optax_learning_rate=optax_lr,
+                num_warmup=nuts_warmup,
+                num_samples=nuts_samples,
+                num_chains=nuts_chains,
+                target_accept_prob=nuts_target_accept,
+                age_grid_gyr=fsps_age_grid,
+                logzsol_grid=fsps_logzsol_grid,
+                prior_config=prior_config,
+                dsps_ssp_fn=dsps_ssp_fn,
+                use_lines=fit_lines,
+                decompose_host=decompose_host,
+                fit_fe=fit_fe,
+                fit_bc=fit_bc,
+                fit_poly=fit_poly,
+            )
         else:
-            raise ValueError(f"Unknown fit_method='{fit_method}'. Use 'nuts' or 'optax'.")
+            raise ValueError(f"Unknown fit_method='{fit_method}'. Use 'nuts', 'optax', or 'optax+nuts'.")
 
         if save_result:
             self.save_result(self.conti_result, self.conti_result_type, self.conti_result_name,
@@ -224,7 +243,8 @@ class QSOFit:
                              decompose_host=True,
                              fit_fe=True,
                              fit_bc=True,
-                             fit_poly=False):
+                             fit_poly=False,
+                             init_values=None):
         """Fit the full model using NUTS MCMC and store posterior summaries."""
         wave = np.asarray(self.wave, dtype=float)
         flux = np.asarray(self.flux, dtype=float)
@@ -275,7 +295,8 @@ class QSOFit:
         )
         self.tied_line_meta = tied_line_meta
 
-        init_strategy = init_to_value(values={'gal_v_kms': 0.0, 'gal_sigma_kms': 150.0})
+        init_vals = {'gal_v_kms': 0.0, 'gal_sigma_kms': 150.0} if init_values is None else init_values
+        init_strategy = init_to_value(values=init_vals)
         kernel = NUTS(qso_fsps_joint_model, init_strategy=init_strategy, target_accept_prob=target_accept_prob, dense_mass=True, max_tree_depth=8)
         mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=True)
         rng_key = jax.random.PRNGKey(0)
@@ -497,6 +518,7 @@ class QSOFit:
         self.svi_state = svi_state
         self.svi_params = svi_params
         self.optax_losses = losses
+        self.optax_map_point = map_point
         self._consume_posterior_outputs(
             samples=samples,
             pred_out=pred_out,
@@ -504,6 +526,50 @@ class QSOFit:
             tied_line_meta=tied_line_meta,
             use_lines=use_lines,
             decompose_host=decompose_host,
+        )
+
+    def run_fsps_optax_nuts_fit(self, optax_steps=2000, optax_learning_rate=1e-2,
+                                num_warmup=500, num_samples=1000, num_chains=1,
+                                target_accept_prob=0.9,
+                                age_grid_gyr=(0.1, 0.3, 1.0, 3.0, 10.0),
+                                logzsol_grid=(-1.0, -0.5, 0.0, 0.2),
+                                prior_config=None,
+                                dsps_ssp_fn='tempdata.h5',
+                                use_lines=True,
+                                decompose_host=True,
+                                fit_fe=True,
+                                fit_bc=True,
+                                fit_poly=False):
+        """Warm-start with Optax MAP, then run NUTS as final inference."""
+        self.run_fsps_optax_fit(
+            num_steps=optax_steps,
+            learning_rate=optax_learning_rate,
+            age_grid_gyr=age_grid_gyr,
+            logzsol_grid=logzsol_grid,
+            prior_config=prior_config,
+            dsps_ssp_fn=dsps_ssp_fn,
+            use_lines=use_lines,
+            decompose_host=decompose_host,
+            fit_fe=fit_fe,
+            fit_bc=fit_bc,
+            fit_poly=fit_poly,
+        )
+        init_values = getattr(self, 'optax_map_point', None)
+        self.run_fsps_numpyro_fit(
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+            target_accept_prob=target_accept_prob,
+            age_grid_gyr=age_grid_gyr,
+            logzsol_grid=logzsol_grid,
+            prior_config=prior_config,
+            dsps_ssp_fn=dsps_ssp_fn,
+            use_lines=use_lines,
+            decompose_host=decompose_host,
+            fit_fe=fit_fe,
+            fit_bc=fit_bc,
+            fit_poly=fit_poly,
+            init_values=init_values,
         )
 
     def _consume_posterior_outputs(self, samples, pred_out, fsps_grid, tied_line_meta, use_lines, decompose_host):
