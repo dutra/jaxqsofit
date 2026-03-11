@@ -21,7 +21,7 @@
 #       f_conti_model, f_line_model, host, qso, line_flux, etc.
 # 4) Plotting is restored in a simplified but familiar PyQSOFit style.
 # 5) The FeII and Balmer components are implemented directly in the forward model.
-# 6) The continuum priors are still read from qsopar.fits.
+# 6) Priors are provided via `prior_config` (or auto-built defaults).
 
 from __future__ import annotations
 
@@ -47,6 +47,7 @@ from numpyro.infer import MCMC, NUTS, Predictive, init_to_value
 
 from dsps import load_ssp_templates
 from dustmaps.sfd import SFDQuery
+from .defaults import build_default_prior_config
 
 warnings.filterwarnings("ignore")
 
@@ -664,7 +665,7 @@ class QSOFit:
         self.output_path = path
 
     def Fit(self, name=None, deredden=True,
-            wave_range=None, wave_mask=None, param_file_name='qsopar.fits', save_fits_name=None,
+            wave_range=None, wave_mask=None, save_fits_name=None,
             fit_lines=True, save_result=True, plot_fig=True, save_fits_path='.', save_fig=True,
             decompose_host=True,
             fit_fe=True,
@@ -689,7 +690,7 @@ class QSOFit:
         self.linefit = fit_lines
         self.save_fig = save_fig
         self.verbose = verbose
-        self.param_file_name = param_file_name
+        prior_config_input = prior_config
         prior_config = {} if prior_config is None else prior_config
         out_params = prior_config.get('out_params', {})
         self.Fe_flux_range = np.asarray(out_params.get('Fe_flux_range', []), dtype=float)
@@ -730,6 +731,9 @@ class QSOFit:
         self.err = self.err_in[ind_gooderror]
         self.flux = self.flux_in[ind_gooderror]
         self.lam = self.lam_in[ind_gooderror]
+
+        if prior_config_input is None:
+            prior_config = build_default_prior_config(self.flux)
 
         if wave_range is not None:
             self._WaveTrim(self.lam, self.flux, self.err, self.z)
@@ -806,7 +810,8 @@ class QSOFit:
         flux = np.asarray(self.flux, dtype=float)
         err = np.asarray(self.err, dtype=float)
 
-        prior_config = {} if prior_config is None else prior_config
+        if prior_config is None:
+            prior_config = build_default_prior_config(flux)
         conti_priors = prior_config.get('conti_priors', {})
         line_table = _extract_line_table_from_prior_config(prior_config)
 
