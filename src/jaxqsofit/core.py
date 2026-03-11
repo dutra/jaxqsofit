@@ -1,661 +1,56 @@
-# PyQSOFit Bayesian-only integration: FSPS + JAX/NumPyro + tied-line logic
-#
-# Updated to restore the standard AGN continuum components from the original PyQSOFit model:
-# - power-law AGN continuum
-# - UV FeII template
-# - optical FeII template
-# - Balmer continuum
-# - dust attenuation term
-#
-# while keeping:
-# - FSPS host galaxy SSP mixture + LOSVD
-# - tied Gaussian emission lines using vindex / windex / findex / fvalue
-# - NumPyro / NUTS sampling
-#
-# Design notes
-# ------------
-# 1) The fitting path is Bayesian-only.
-# 2) FSPS is assumed available.
-# 3) We preserve the standard PyQSOFit component names on the object where practical:
-#       f_pl_model, f_fe_mgii_model, f_fe_balmer_model, f_bc_model, f_poly_model,
-#       f_conti_model, f_line_model, host, qso, line_flux, etc.
-# 4) Plotting is restored in a simplified but familiar PyQSOFit style.
-# 5) The FeII and Balmer components are implemented directly in the forward model.
-# 6) Priors are provided via `prior_config` (or auto-built defaults).
-
 from __future__ import annotations
 
 import os
-import warnings
-from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import extinction
+import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from astropy.io import fits
-from astropy.table import Table
 
 import jax
 import jax.numpy as jnp
-import numpyro
-import numpyro.distributions as dist
 import optax
 from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 from numpyro.optim import optax_to_numpyro
 
-from dsps import load_ssp_templates
-from dustmaps.sfd import SFDQuery
 from .defaults import build_default_prior_config
-
-warnings.filterwarnings("ignore")
-
-C_KMS = 299792.458
-_SFD_QUERY_CACHE: Dict[str, Any] = {}
-
-
-def unred(wave, flux, ebv, R_V=3.1):
-    # Preserve legacy function signature; use extinction package implementation.
-    wave = np.asarray(wave, dtype=float)
-    flux = np.asarray(flux, dtype=float)
-    a_lambda = extinction.fitzpatrick99(wave, a_v=R_V * ebv, r_v=R_V)
-    return extinction.remove(a_lambda, flux)
-
-
-def _np_to_jnp(x):
-    return jnp.asarray(np.asarray(x, dtype=np.float64))
-
-
-def _normalize_template_flux(flux: np.ndarray, target_amp: float = 1.0) -> np.ndarray:
-    """Rescale a template so its robust peak amplitude is O(target_amp)."""
-    f = np.asarray(flux, dtype=float)
-    robust = np.nanpercentile(np.abs(f), 99)
-    if not np.isfinite(robust) or robust <= 0:
-        robust = 1.0
-    return f * (target_amp / robust)
-
-
-def _powerlaw_jax(wave, pl_norm, pl_slope, pivot=3000.0):
-    x = jnp.clip(wave / pivot, 1e-8, None)
-    return pl_norm * x ** pl_slope
-
-
-def _many_gauss_lnlam(lnlam, amps, mus, sigs):
-    z = (lnlam[:, None] - mus[None, :]) / sigs[None, :]
-    return jnp.sum(amps[None, :] * jnp.exp(-0.5 * z * z), axis=1)
-
-
-def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms):
-    dln = jnp.median(jnp.diff(lnwave))
-    sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=128)
-
-    wave = jnp.exp(lnwave)
-    shift_ln = v_kms / C_KMS
-    shifted_wave = jnp.exp(lnwave - shift_ln)
-    shifted = jnp.interp(shifted_wave, wave, spectrum, left=0.0, right=0.0)
-    return jnp.convolve(shifted, kern, mode='same')
-
-
-def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512):
-    sigma_pix = jnp.maximum(sigma_pix, 1e-3)
-    x = jnp.arange(-max_half, max_half + 1, dtype=jnp.float64)
-    half_dyn = jnp.maximum(3.0, jnp.ceil(radius_mult * sigma_pix))
-    mask = jnp.abs(x) <= half_dyn
-    k = jnp.exp(-0.5 * (x / sigma_pix) ** 2)
-    k = jnp.where(mask, k, 0.0)
-    return k / jnp.maximum(jnp.sum(k), 1e-30)
-
-
-def _fe_template_component(wave, wave_template, flux_template, norm, fwhm_kms, shift_frac, base_fwhm_kms=900.0):
-    # Enforce physically non-negative Fe pseudo-continuum and model broadening in velocity space.
-    flux_template = jnp.maximum(flux_template, 0.0)
-    template_on_wave = jnp.interp(wave, wave_template, flux_template, left=0.0, right=0.0)
-
-    fwhm_eff = jnp.sqrt(jnp.maximum(fwhm_kms**2 - base_fwhm_kms**2, 910.0**2 - base_fwhm_kms**2))
-    sigma_kms = fwhm_eff / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0)))
-    v_kms = C_KMS * shift_frac
-    lnwave = jnp.log(wave)
-    model = _shift_and_broaden_single_spectrum_lnlam(lnwave, template_on_wave, v_kms, sigma_kms)
-    return norm * model
-
-
-def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
-    lam_be = 3646.0
-    h = 6.62607015e-27
-    c = 2.99792458e10
-    kb = 1.380649e-16
-
-    wave = jnp.asarray(wave)
-    lam_cm = wave * 1e-8
-
-    expo = jnp.clip((h * c) / (lam_cm * kb * balmer_te), 1e-9, 700.0)
-    bb = (2.0 * h * c**2 / lam_cm**5) / jnp.expm1(expo)
-    bb = bb * 1e-8 * jnp.pi
-
-    # Normalize shape at Balmer edge so balmer_norm is a flux-like amplitude.
-    lam_be_cm = lam_be * 1e-8
-    expo_edge = jnp.clip((h * c) / (lam_be_cm * kb * balmer_te), 1e-9, 700.0)
-    bb_edge = (2.0 * h * c**2 / lam_be_cm**5) / jnp.expm1(expo_edge)
-    bb_edge = bb_edge * 1e-8 * jnp.pi
-    bb = bb / jnp.maximum(bb_edge, 1e-30)
-
-    tau = balmer_tau * (wave / lam_be) ** 3
-    bc = balmer_norm * (1.0 - jnp.exp(-tau)) * bb
-    bc = jnp.where(wave <= lam_be, bc, 0.0)
-
-    lnwave = jnp.log(wave)
-    dln = jnp.median(jnp.diff(lnwave))
-    sigma_ln = jnp.maximum(balmer_vel / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kernel = _gaussian_kernel1d(sigma_pix)
-    bc_conv = jnp.convolve(bc, kernel, mode='same')
-    return bc_conv
-
-
-@dataclass
-class FSPSTemplateGrid:
-    wave: np.ndarray
-    templates: np.ndarray
-    template_meta: List[Dict[str, float]]
-    age_grid_gyr: np.ndarray
-    logzsol_grid: np.ndarray
-
-
-def _map_logzsol_to_dsps_lgmet(logzsol_grid: Sequence[float], ssp_lgmet: np.ndarray) -> np.ndarray:
-    logzsol_grid = np.asarray(logzsol_grid, dtype=float)
-    ssp_lgmet = np.asarray(ssp_lgmet, dtype=float)
-
-    # DSPS metallicity grids are often log10(Z), while fitting grids are usually log10(Z/Zsun).
-    # Select the transform that best matches the available DSPS metallicity grid.
-    cand_direct = logzsol_grid
-    cand_shifted = logzsol_grid + np.log10(0.019)
-
-    def mismatch(cand):
-        return np.mean([np.min(np.abs(ssp_lgmet - val)) for val in cand])
-
-    return cand_direct if mismatch(cand_direct) <= mismatch(cand_shifted) else cand_shifted
-
-
-def _get_sfd_query():
-    cache_key = "default"
-    if cache_key in _SFD_QUERY_CACHE:
-        return _SFD_QUERY_CACHE[cache_key]
-
-    q = SFDQuery()
-    _SFD_QUERY_CACHE[cache_key] = q
-    return q
-
-
-def build_fsps_template_grid(
-    wave_out: np.ndarray,
-    age_grid_gyr: Sequence[float] = (0.1, 0.3, 1.0, 3.0, 10.0),
-    logzsol_grid: Sequence[float] = (-1.0, -0.5, 0.0, 0.2),
-    imf_type: int = 1,
-    zcontinuous: int = 1,
-    sfh: int = 0,
-    dsps_ssp_fn: str = 'tempdata.h5',
-) -> FSPSTemplateGrid:
-    # Parameters kept for API compatibility.
-    _ = (imf_type, zcontinuous, sfh)
-
-    # DSPS quickstart pattern:
-    # from dsps import load_ssp_templates
-    # ssp_data = load_ssp_templates(fn='tempdata.h5')
-    ssp_data = load_ssp_templates(fn=dsps_ssp_fn)
-    ssp_lgmet = np.asarray(ssp_data.ssp_lgmet, dtype=float)
-    ssp_lg_age_gyr = np.asarray(ssp_data.ssp_lg_age_gyr, dtype=float)
-    ssp_wave = np.asarray(ssp_data.ssp_wave, dtype=float)
-    ssp_flux = np.asarray(ssp_data.ssp_flux, dtype=float)
-
-    wave_out = np.asarray(wave_out, dtype=float)
-    age_grid_gyr = np.asarray(age_grid_gyr, dtype=float)
-    logzsol_grid = np.asarray(logzsol_grid, dtype=float)
-    target_lg_age = np.log10(np.clip(age_grid_gyr, 1e-5, None))
-    target_lgmet = _map_logzsol_to_dsps_lgmet(logzsol_grid, ssp_lgmet)
-
-    tmpl = []
-    meta = []
-    for i_z, logz in enumerate(logzsol_grid):
-        imet = int(np.argmin(np.abs(ssp_lgmet - target_lgmet[i_z])))
-        for i_a, age in enumerate(age_grid_gyr):
-            iage = int(np.argmin(np.abs(ssp_lg_age_gyr - target_lg_age[i_a])))
-            spec_native = np.asarray(ssp_flux[imet, iage, :], dtype=float)
-            spec_interp = np.interp(wave_out, ssp_wave, spec_native, left=0.0, right=0.0)
-            norm = np.nanmedian(np.abs(spec_interp))
-            if not np.isfinite(norm) or norm <= 0:
-                norm = 1.0
-            spec_interp = spec_interp / norm
-            tmpl.append(spec_interp)
-            meta.append({
-                'tage_gyr': float(age),
-                'logzsol': float(logz),
-                'norm': float(norm),
-                'dsps_lgmet': float(ssp_lgmet[imet]),
-                'dsps_lg_age_gyr': float(ssp_lg_age_gyr[iage]),
-            })
-
-    templates = np.column_stack(tmpl)
-    return FSPSTemplateGrid(
-        wave=wave_out,
-        templates=templates,
-        template_meta=meta,
-        age_grid_gyr=np.asarray(age_grid_gyr, dtype=float),
-        logzsol_grid=np.asarray(logzsol_grid, dtype=float),
-    )
-
-
-def _extract_line_table_from_prior_config(prior_config: Dict[str, Any] | None):
-    if prior_config is None:
-        return None
-    if 'line_priors' in prior_config:
-        return prior_config['line_priors']
-    if 'line_table' in prior_config:
-        return prior_config['line_table']
-    line_cfg = prior_config.get('line', None)
-    if isinstance(line_cfg, dict):
-        if 'table' in line_cfg:
-            return line_cfg['table']
-        if 'priors' in line_cfg:
-            return line_cfg['priors']
-    return None
-
-
-def _compress_group_ids(ids: np.ndarray, labels: Sequence[str] | None = None) -> Tuple[np.ndarray, Dict[Any, int]]:
-    out = np.full(len(ids), -1, dtype=int)
-    mapping: Dict[Any, int] = {}
-    next_gid = 0
-    for i, gid in enumerate(ids):
-        gid = int(gid)
-        if gid <= 0:
-            continue
-        key: Any = gid if labels is None else (str(labels[i]), gid)
-        if key not in mapping:
-            mapping[key] = next_gid
-            next_gid += 1
-        out[i] = mapping[key]
-    return out, mapping
-
-
-def build_tied_line_meta_from_linelist(linelist, wave):
-    def _to_records(obj):
-        # pandas.DataFrame
-        if hasattr(obj, 'to_dict'):
-            return obj.to_dict('records')
-        # Astropy table / FITS recarray / numpy structured array
-        if hasattr(obj, 'dtype') and getattr(obj.dtype, 'names', None):
-            return [{name: row[name] for name in obj.dtype.names} for row in obj]
-        if hasattr(obj, 'colnames'):
-            return [{name: row[name] for name in obj.colnames} for row in obj]
-        # list[dict]-like
-        return list(obj)
-
-    records = _to_records(linelist)
-    rows = []
-    wmin = float(np.min(wave))
-    wmax = float(np.max(wave))
-    for row in records:
-        lam = float(row['lambda'])
-        if lam > wmin and lam < wmax:
-            rows.append(row)
-
-    ln_lambda0 = []
-    amp_init = []
-    amp_min = []
-    amp_max = []
-    sig_init = []
-    sig_min = []
-    sig_max = []
-    dmu_min = []
-    dmu_max = []
-    names = []
-    line_lambda = []
-    vindex = []
-    windex = []
-    findex = []
-    fvalue = []
-    compnames = []
-
-    for row in rows:
-        for i in range(int(row.get('ngauss', 1))):
-            ln0 = np.log(float(row['lambda']))
-            voff = float(row['voff'])
-            dln = voff / C_KMS
-            ln_lambda0.append(ln0)
-            line_lambda.append(float(row['lambda']))
-            amp_init.append(float(row['inisca']))
-            amp_min.append(float(row['minsca']))
-            amp_max.append(float(row['maxsca']))
-            sig_init.append(max(float(row['inisig']), 1e-5))
-            sig_min.append(max(float(row['minsig']), 1e-5))
-            sig_max.append(max(float(row['maxsig']), 1e-5))
-            dmu_min.append(-dln)
-            dmu_max.append(+dln)
-            linename = str(row.get('linename', f"line_{row['lambda']:.1f}"))
-            names.append(f"{linename}_{i+1}")
-            vindex.append(int(row['vindex']))
-            windex.append(int(row['windex']))
-            findex.append(int(row['findex']))
-            fvalue.append(float(row['fvalue']))
-            compnames.append(str(row.get('compname', linename)))
-
-    ln_lambda0 = np.asarray(ln_lambda0, dtype=float)
-    amp_init = np.asarray(amp_init, dtype=float)
-    amp_min = np.asarray(amp_min, dtype=float)
-    amp_max = np.asarray(amp_max, dtype=float)
-    sig_init = np.asarray(sig_init, dtype=float)
-    sig_min = np.asarray(sig_min, dtype=float)
-    sig_max = np.asarray(sig_max, dtype=float)
-    dmu_min = np.asarray(dmu_min, dtype=float)
-    dmu_max = np.asarray(dmu_max, dtype=float)
-    vindex = np.asarray(vindex, dtype=int)
-    windex = np.asarray(windex, dtype=int)
-    findex = np.asarray(findex, dtype=int)
-    fvalue = np.asarray(fvalue, dtype=float)
-
-    # Tie indices are local to each line complex in qsopar; include compname in the key
-    # to avoid accidental cross-complex tying when index integers are reused.
-    vgroup, _ = _compress_group_ids(vindex, compnames)
-    next_gid = np.max(vgroup) + 1 if len(vgroup) and np.any(vgroup >= 0) else 0
-    for i in range(len(vgroup)):
-        if vgroup[i] < 0:
-            vgroup[i] = next_gid
-            next_gid += 1
-    n_vgroups = int(np.max(vgroup)) + 1 if len(vgroup) else 0
-
-    wgroup, _ = _compress_group_ids(windex, compnames)
-    next_gid = np.max(wgroup) + 1 if len(wgroup) and np.any(wgroup >= 0) else 0
-    for i in range(len(wgroup)):
-        if wgroup[i] < 0:
-            wgroup[i] = next_gid
-            next_gid += 1
-    n_wgroups = int(np.max(wgroup)) + 1 if len(wgroup) else 0
-
-    fgroup, _ = _compress_group_ids(findex, compnames)
-    flux_ratio = np.ones(len(fgroup), dtype=float)
-    next_gid = np.max(fgroup) + 1 if len(fgroup) and np.any(fgroup >= 0) else 0
-    for local_gid in sorted(set([g for g in fgroup if g >= 0])):
-        members = np.where(fgroup == local_gid)[0]
-        ref = members[0]
-        ref_f = fvalue[ref] if fvalue[ref] != 0 else 1.0
-        for m in members:
-            flux_ratio[m] = fvalue[m] / ref_f if ref_f != 0 else 1.0
-    for i in range(len(fgroup)):
-        if fgroup[i] < 0:
-            fgroup[i] = next_gid
-            flux_ratio[i] = 1.0
-            next_gid += 1
-    n_fgroups = int(np.max(fgroup)) + 1 if len(fgroup) else 0
-
-    amp_init_group = np.zeros(n_fgroups, dtype=float)
-    amp_min_group = np.zeros(n_fgroups, dtype=float)
-    amp_max_group = np.zeros(n_fgroups, dtype=float)
-    for gid in range(n_fgroups):
-        ref = np.where(fgroup == gid)[0][0]
-        amp_init_group[gid] = amp_init[ref]
-        amp_min_group[gid] = amp_min[ref]
-        amp_max_group[gid] = amp_max[ref]
-
-    dmu_init_group = np.zeros(n_vgroups, dtype=float)
-    dmu_min_group = np.zeros(n_vgroups, dtype=float)
-    dmu_max_group = np.zeros(n_vgroups, dtype=float)
-    for gid in range(n_vgroups):
-        members = np.where(vgroup == gid)[0]
-        dmu_init_group[gid] = 0.0
-        dmu_min_group[gid] = np.max(dmu_min[members])
-        dmu_max_group[gid] = np.min(dmu_max[members])
-
-    sig_init_group = np.zeros(n_wgroups, dtype=float)
-    sig_min_group = np.zeros(n_wgroups, dtype=float)
-    sig_max_group = np.zeros(n_wgroups, dtype=float)
-    for gid in range(n_wgroups):
-        members = np.where(wgroup == gid)[0]
-        sig_init_group[gid] = np.median(sig_init[members])
-        sig_min_group[gid] = np.max(sig_min[members])
-        sig_max_group[gid] = np.min(sig_max[members])
-        if sig_max_group[gid] <= sig_min_group[gid]:
-            sig_max_group[gid] = max(sig_min_group[gid] * 1.1, sig_min_group[gid] + 1e-4)
-
-    return {
-        'n_lines': len(ln_lambda0),
-        'n_vgroups': n_vgroups,
-        'n_wgroups': n_wgroups,
-        'n_fgroups': n_fgroups,
-        'ln_lambda0': _np_to_jnp(ln_lambda0),
-        'vgroup': np.asarray(vgroup, dtype=int),
-        'wgroup': np.asarray(wgroup, dtype=int),
-        'fgroup': np.asarray(fgroup, dtype=int),
-        'flux_ratio': np.asarray(flux_ratio, dtype=float),
-        'dmu_init_group': np.asarray(dmu_init_group, dtype=float),
-        'dmu_min_group': np.asarray(dmu_min_group, dtype=float),
-        'dmu_max_group': np.asarray(dmu_max_group, dtype=float),
-        'sig_init_group': np.asarray(sig_init_group, dtype=float),
-        'sig_min_group': np.asarray(sig_min_group, dtype=float),
-        'sig_max_group': np.asarray(sig_max_group, dtype=float),
-        'amp_init_group': np.asarray(amp_init_group, dtype=float),
-        'amp_min_group': np.asarray(amp_min_group, dtype=float),
-        'amp_max_group': np.asarray(amp_max_group, dtype=float),
-        'names': names,
-        'compnames': compnames,
-        'line_lambda': np.asarray(line_lambda, dtype=float),
-    }
-
-
-def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_grid,
-                         fe_uv_wave, fe_uv_flux, fe_op_wave, fe_op_flux, use_lines=True,
-                         prior_config=None, decompose_host=True, fit_fe=True, fit_bc=True, fit_poly=False):
-    wave = _np_to_jnp(wave)
-    flux = _np_to_jnp(flux)
-    err = _np_to_jnp(err)
-    lnwave = jnp.log(wave)
-    templates = _np_to_jnp(fsps_grid.templates)
-    fe_uv_wave = _np_to_jnp(fe_uv_wave)
-    fe_uv_flux = _np_to_jnp(fe_uv_flux)
-    fe_op_wave = _np_to_jnp(fe_op_wave)
-    fe_op_flux = _np_to_jnp(fe_op_flux)
-    prior_config = {} if prior_config is None else prior_config
-
-    def _cfg_norm(key):
-        cfg = prior_config[key]
-        if isinstance(cfg, dict) and ('loc' in cfg and 'scale' in cfg):
-            return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
-        if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
-            return jnp.asarray(cfg[0]), jnp.asarray(cfg[1])
-        return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
-
-    def _cfg_halfnorm(key, ref_scale=None):
-        cfg = prior_config[key]
-        if isinstance(cfg, dict):
-            if 'scale' in cfg:
-                return jnp.asarray(cfg['scale'])
-            if 'scale_mult_err' in cfg:
-                return jnp.asarray(cfg['scale_mult_err'] * ref_scale)
-        if isinstance(cfg, (tuple, list)) and len(cfg) >= 1:
-            return jnp.asarray(cfg[0])
-        return jnp.asarray(cfg)
-
-    # Continuum amplitude + host fraction parameterization
-    cont_norm = numpyro.sample('cont_norm', dist.LogNormal(*_cfg_norm('log_cont_norm')))
-    if decompose_host:
-        log_frac_host = numpyro.sample('log_frac_host', dist.Normal(*_cfg_norm('log_frac_host')))
-        frac_host = jax.nn.sigmoid(log_frac_host)
-    else:
-        frac_host = jnp.asarray(0.0)
-    pl_norm = cont_norm * (1.0 - frac_host)
-    pl_slope_cfg = prior_config['PL_slope']
-    pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
-    if isinstance(pl_slope_cfg, dict) and ('low' in pl_slope_cfg and 'high' in pl_slope_cfg):
-        pl_slope = numpyro.sample(
-            'PL_slope',
-            dist.TruncatedNormal(
-                loc=pl_slope_loc,
-                scale=pl_slope_scale,
-                low=pl_slope_cfg['low'],
-                high=pl_slope_cfg['high'],
-            ),
-        )
-    else:
-        pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
-
-    if fit_fe:
-        fe_uv_norm = numpyro.sample('Fe_uv_norm', dist.LogNormal(*_cfg_norm('log_Fe_uv_norm')))
-        fe_op_norm = numpyro.sample('Fe_op_norm', dist.LogNormal(*_cfg_norm('log_Fe_op_norm')))
-        fe_uv_fwhm = numpyro.sample('Fe_uv_FWHM', dist.LogNormal(*_cfg_norm('log_Fe_uv_FWHM')))
-        fe_op_fwhm = numpyro.sample('Fe_op_FWHM', dist.LogNormal(*_cfg_norm('log_Fe_op_FWHM')))
-        fe_uv_shift = numpyro.sample('Fe_uv_shift', dist.Normal(*_cfg_norm('Fe_uv_shift')))
-        fe_op_shift = numpyro.sample('Fe_op_shift', dist.Normal(*_cfg_norm('Fe_op_shift')))
-    else:
-        fe_uv_norm = jnp.asarray(0.0)
-        fe_op_norm = jnp.asarray(0.0)
-        fe_uv_fwhm = jnp.asarray(3000.0)
-        fe_op_fwhm = jnp.asarray(3000.0)
-        fe_uv_shift = jnp.asarray(0.0)
-        fe_op_shift = jnp.asarray(0.0)
-
-    if fit_bc:
-        balmer_norm = numpyro.sample('Balmer_norm', dist.LogNormal(*_cfg_norm('log_Balmer_norm')))
-        balmer_te = jnp.asarray(15000.0) #numpyro.sample('Balmer_Te', dist.Normal(*_cfg_norm('Balmer_Te')))
-        balmer_tau = numpyro.sample('Balmer_Tau', dist.LogNormal(*_cfg_norm('log_Balmer_Tau')))
-        balmer_vel = numpyro.sample('Balmer_vel', dist.LogNormal(*_cfg_norm('log_Balmer_vel')))
-    else:
-        balmer_norm = jnp.asarray(0.0)
-        balmer_te = jnp.asarray(15000.0)
-        balmer_tau = jnp.asarray(0.5)
-        balmer_vel = jnp.asarray(3000.0)
-
-    pl_model_intrinsic = _powerlaw_jax(wave, pl_norm=pl_norm, pl_slope=pl_slope, pivot=3000.0)
-    fe_uv_model_intrinsic = _fe_template_component(wave, fe_uv_wave, fe_uv_flux, fe_uv_norm, fe_uv_fwhm, fe_uv_shift)
-    fe_op_model_intrinsic = _fe_template_component(wave, fe_op_wave, fe_op_flux, fe_op_norm, fe_op_fwhm, fe_op_shift)
-    bc_model_intrinsic = _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel)
-    pl_model = pl_model_intrinsic
-    fe_uv_model = fe_uv_model_intrinsic
-    fe_op_model = fe_op_model_intrinsic
-    bc_model = bc_model_intrinsic
-    poly_model = jnp.ones_like(wave)
-    if fit_poly:
-        poly_c1 = numpyro.sample('poly_c1', dist.Normal(*_cfg_norm('poly_c1')))
-        poly_c2 = numpyro.sample('poly_c2', dist.Normal(*_cfg_norm('poly_c2')))
-        w0 = jnp.median(wave)
-        x = (wave - w0) / jnp.maximum(w0, 1.0)
-        poly_model = jnp.clip(1.0 + poly_c1 * x + poly_c2 * x * x, 0.2, 5.0)
-        pl_model = pl_model * poly_model
-        fe_uv_model = fe_uv_model * poly_model
-        fe_op_model = fe_op_model * poly_model
-        bc_model = bc_model * poly_model
-    agn_model = pl_model + fe_uv_model + fe_op_model + bc_model
-
-    ntemp = fsps_grid.templates.shape[1]
-    if decompose_host:
-        tau_host = numpyro.sample('tau_host', dist.HalfNormal(_cfg_halfnorm('tau_host')))
-        raw_w_loc, _ = _cfg_norm('raw_w')
-        raw_w = numpyro.sample('fsps_weights_raw', dist.Normal(jnp.full((ntemp,), raw_w_loc), tau_host))
-        fsps_weights_frac = jax.nn.softmax(raw_w)
-        host_amp = cont_norm * frac_host
-        fsps_weights = host_amp * fsps_weights_frac
-        gal_v_kms = numpyro.sample('gal_v_kms', dist.Normal(*_cfg_norm('gal_v_kms')))
-        gal_sigma_kms = numpyro.sample('gal_sigma_kms', dist.HalfNormal(_cfg_halfnorm('gal_sigma_kms')))
-        gal_intrinsic = jnp.dot(templates, fsps_weights)
-        gal_model_intrinsic = _shift_and_broaden_single_spectrum_lnlam(lnwave, gal_intrinsic, gal_v_kms, gal_sigma_kms)
-    else:
-        fsps_weights_frac = jnp.zeros((ntemp,))
-        fsps_weights = jnp.zeros((ntemp,))
-        gal_model_intrinsic = jnp.zeros_like(wave)
-
-    if use_lines and tied_line_meta['n_lines'] > 0:
-        n_v = tied_line_meta['n_vgroups']
-        n_w = tied_line_meta['n_wgroups']
-        n_f = tied_line_meta['n_fgroups']
-        dmu_scale_mult = float(prior_config['line_dmu_scale_mult'])
-        sig_scale_mult = float(prior_config['line_sig_scale_mult'])
-        amp_scale_mult = float(prior_config['line_amp_scale_mult'])
-
-        dmu_group = numpyro.sample(
-            'line_dmu_group',
-            dist.TruncatedNormal(
-                loc=_np_to_jnp(tied_line_meta['dmu_init_group']),
-                scale=_np_to_jnp(np.maximum(dmu_scale_mult * (tied_line_meta['dmu_max_group'] - tied_line_meta['dmu_min_group']), 1e-6)),
-                low=_np_to_jnp(tied_line_meta['dmu_min_group']),
-                high=_np_to_jnp(tied_line_meta['dmu_max_group']),
-            )
-        ) if n_v > 0 else jnp.zeros((0,))
-
-        sig_group = numpyro.sample(
-            'line_sig_group',
-            dist.TruncatedNormal(
-                loc=_np_to_jnp(np.clip(tied_line_meta['sig_init_group'], 1e-5, None)),
-                scale=_np_to_jnp(np.maximum(sig_scale_mult * (tied_line_meta['sig_max_group'] - tied_line_meta['sig_min_group']), 1e-6)),
-                low=_np_to_jnp(np.clip(tied_line_meta['sig_min_group'], 1e-5, None)),
-                high=_np_to_jnp(np.clip(tied_line_meta['sig_max_group'], 1e-5, None)),
-            )
-        ) if n_w > 0 else jnp.zeros((0,))
-
-        amp_group = numpyro.sample(
-            'line_amp_group',
-            dist.TruncatedNormal(
-                loc=_np_to_jnp(np.clip(tied_line_meta['amp_init_group'], 1e-10, None)),
-                scale=_np_to_jnp(np.maximum(amp_scale_mult * (tied_line_meta['amp_max_group'] - tied_line_meta['amp_min_group']), 1e-10)),
-                low=_np_to_jnp(np.clip(tied_line_meta['amp_min_group'], 1e-10, None)),
-                high=_np_to_jnp(np.clip(tied_line_meta['amp_max_group'], 1e-10, None)),
-            )
-        ) if n_f > 0 else jnp.zeros((0,))
-
-        dmu = dmu_group[_np_to_jnp(tied_line_meta['vgroup']).astype(int)]
-        sigs = sig_group[_np_to_jnp(tied_line_meta['wgroup']).astype(int)]
-        amps = amp_group[_np_to_jnp(tied_line_meta['fgroup']).astype(int)] * _np_to_jnp(tied_line_meta['flux_ratio'])
-        mus = tied_line_meta['ln_lambda0'] + dmu
-
-        line_model_intrinsic = _many_gauss_lnlam(lnwave, amps, mus, sigs)
-        numpyro.deterministic('line_amp_per_component', amps)
-        numpyro.deterministic('line_mu_per_component', mus)
-        numpyro.deterministic('line_sig_per_component', sigs)
-    else:
-        line_model_intrinsic = jnp.zeros_like(wave)
-
-    gal_model = gal_model_intrinsic
-    line_model = line_model_intrinsic
-    if fit_poly:
-        gal_model = gal_model * poly_model
-        line_model = line_model * poly_model
-
-    frac_jitter = numpyro.sample('frac_jitter', dist.HalfNormal(_cfg_halfnorm('frac_jitter')))
-    add_jitter = numpyro.sample('add_jitter', dist.HalfNormal(_cfg_halfnorm('add_jitter', ref_scale=jnp.median(err))))
-
-    continuum_model = agn_model + gal_model
-    model = continuum_model + line_model
-    sigma_tot = jnp.sqrt(err**2 + (frac_jitter * jnp.abs(model))**2 + add_jitter**2)
-
-    numpyro.deterministic('f_pl_model', pl_model)
-    numpyro.deterministic('f_fe_mgii_model', fe_uv_model)
-    numpyro.deterministic('f_fe_balmer_model', fe_op_model)
-    numpyro.deterministic('f_bc_model', bc_model)
-    numpyro.deterministic('f_poly_model', poly_model)
-    numpyro.deterministic('agn_model', agn_model)
-    numpyro.deterministic('gal_model_intrinsic', gal_model_intrinsic)
-    numpyro.deterministic('gal_model', gal_model)
-    numpyro.deterministic('line_model_intrinsic', line_model_intrinsic)
-    numpyro.deterministic('line_model', line_model)
-    numpyro.deterministic('continuum_model', continuum_model)
-    numpyro.deterministic('model', model)
-    numpyro.deterministic('PL_norm_eff', pl_norm)
-    numpyro.deterministic('frac_host', frac_host)
-    numpyro.deterministic('fsps_weights', fsps_weights)
-    numpyro.deterministic('fsps_weights_frac', fsps_weights_frac)
-
-    student_t_df = float(prior_config.get('student_t_df', 3.0))
-    numpyro.sample('obs', dist.StudentT(df=student_t_df, loc=model, scale=sigma_tot), obs=flux)
-
+from .model import (
+    _extract_line_table_from_prior_config,
+    _get_sfd_query,
+    _normalize_template_flux,
+    _np_to_jnp,
+    build_fsps_template_grid,
+    build_tied_line_meta_from_linelist,
+    qso_fsps_joint_model,
+    unred,
+)
 
 class QSOFit:
-    def __init__(self, lam, flux, err, z, ra=-999, dec=-999, plateid=None, mjd=None, fiberid=None, path=None,
+    def __init__(self, lam, flux, err=None, z=0.0, ra=-999, dec=-999, plateid=None, mjd=None, fiberid=None, path=None,
                  wdisp=None):
+        """Initialize a spectral fitting object with observed-frame inputs.
+
+        Notes
+        -----
+        Providing per-pixel `err` is strongly recommended for robust inference.
+        If `err` is not provided, a small default uncertainty (`1e-6`) is used;
+        in that case, fitted intrinsic-scatter terms absorb much of the noise model.
+
+        Use keyword arguments to avoid ambiguity (for example `z=...`).
+        """
         self.lam_in = np.asarray(lam, dtype=np.float64)
         self.flux_in = np.asarray(flux, dtype=np.float64)
-        self.err_in = np.asarray(err, dtype=np.float64)
+        if err is None:
+            self.err_in = np.full_like(self.flux_in, 1e-6, dtype=np.float64)
+        else:
+            err_arr = np.asarray(err, dtype=np.float64)
+            if err_arr.ndim == 0:
+                self.err_in = np.full_like(self.flux_in, float(err_arr), dtype=np.float64)
+            else:
+                self.err_in = err_arr
         self.z = z
         self.wdisp = wdisp
         self.ra = ra
@@ -669,7 +64,7 @@ class QSOFit:
 
     def Fit(self, name=None, deredden=True,
             wave_range=None, wave_mask=None, save_fits_name=None,
-            fit_lines=True, save_result=True, plot_fig=True, save_fits_path='.', save_fig=True,
+            fit_lines=True, save_result=True, plot_fig=True, save_fig=True,
             decompose_host=True,
             fit_fe=True,
             fit_bc=True,
@@ -687,6 +82,7 @@ class QSOFit:
             optax_steps=2000,
             optax_lr=1e-2,
             kwargs_plot=None):
+        """Run end-to-end preprocessing, fitting, and optional plotting/saving."""
 
         if kwargs_plot is None:
             kwargs_plot = {}
@@ -788,7 +184,7 @@ class QSOFit:
         if save_result:
             self.save_result(self.conti_result, self.conti_result_type, self.conti_result_name,
                              self.line_result, self.line_result_type, self.line_result_name,
-                             save_fits_path, save_fits_name)
+                             save_fits_name)
         if plot_fig:
             plot_kwargs = dict(kwargs_plot)
             do_trace = bool(plot_kwargs.pop('plot_trace', True))
@@ -829,6 +225,7 @@ class QSOFit:
                              fit_fe=True,
                              fit_bc=True,
                              fit_poly=False):
+        """Fit the full model using NUTS MCMC and store posterior summaries."""
         wave = np.asarray(self.wave, dtype=float)
         flux = np.asarray(self.flux, dtype=float)
         err = np.asarray(self.err, dtype=float)
@@ -950,6 +347,7 @@ class QSOFit:
                            fit_fe=True,
                            fit_bc=True,
                            fit_poly=False):
+        """Fit a MAP approximation using staged SVI with an Optax optimizer."""
         wave = np.asarray(self.wave, dtype=float)
         flux = np.asarray(self.flux, dtype=float)
         err = np.asarray(self.err, dtype=float)
@@ -1000,6 +398,7 @@ class QSOFit:
         self.tied_line_meta = tied_line_meta
 
         def _run_svi(guide, steps, use_lines_i, fit_fe_i, fit_bc_i, fit_poly_i, decompose_host_i):
+            """Run an SVI stage and return optimizer state/results."""
             optimizer = optax_to_numpyro(optax.adam(learning_rate))
             svi = SVI(qso_fsps_joint_model, guide, optimizer, loss=Trace_ELBO())
             key = jax.random.PRNGKey(0)
@@ -1108,6 +507,7 @@ class QSOFit:
         )
 
     def _consume_posterior_outputs(self, samples, pred_out, fsps_grid, tied_line_meta, use_lines, decompose_host):
+        """Populate model components, uncertainty bands, and summary tables."""
         flux = np.asarray(self.flux, dtype=float)
         self.numpyro_samples = samples
         self.fsps_grid = fsps_grid
@@ -1133,16 +533,17 @@ class QSOFit:
         self.decomposed = True
 
         def _band(x):
+            """Compute 16th/84th percentile uncertainty band across samples."""
             a = np.asarray(x)
             return np.percentile(a, 16, axis=0), np.percentile(a, 84, axis=0)
 
         cont_plus_lines = np.asarray(pred_out['continuum_model']) + np.asarray(pred_out['line_model'])
+        fe_total = np.asarray(pred_out['f_fe_mgii_model']) + np.asarray(pred_out['f_fe_balmer_model'])
         self.pred_bands = {
             'total_model': _band(pred_out['model']),
             'host': _band(pred_out['gal_model']),
             'PL': _band(pred_out['f_pl_model']),
-            'FeII_UV': _band(pred_out['f_fe_mgii_model']),
-            'FeII_opt': _band(pred_out['f_fe_balmer_model']),
+            'FeII': _band(fe_total),
             'Balmer_cont': _band(pred_out['f_bc_model']),
             'continuum': _band(pred_out['continuum_model']),
             'lines': _band(pred_out['line_model']),
@@ -1250,6 +651,7 @@ class QSOFit:
             self.line_component_sig_median = np.array([])
 
     def _WaveTrim(self, lam, flux, err, z):
+        """Apply rest-frame wavelength range trimming."""
         ind_trim = np.where((lam / (1 + z) > self.wave_range[0]) & (lam / (1 + z) < self.wave_range[1]), True, False)
         self.lam, self.flux, self.err = lam[ind_trim], flux[ind_trim], err[ind_trim]
         if len(self.lam) < 100:
@@ -1257,6 +659,7 @@ class QSOFit:
         return self.lam, self.flux, self.err
 
     def _WaveMsk(self, lam, flux, err, z):
+        """Mask user-provided rest-frame wavelength intervals."""
         for msk in range(len(self.wave_mask)):
             ind_not_mask = ~np.where((lam / (1 + z) > self.wave_mask[msk, 0]) & (lam / (1 + z) < self.wave_mask[msk, 1]), True, False)
             self.lam, self.flux, self.err = lam[ind_not_mask], flux[ind_not_mask], err[ind_not_mask]
@@ -1264,6 +667,7 @@ class QSOFit:
         return self.lam, self.flux, self.err
 
     def _DeRedden(self, lam, flux, err, ra, dec):
+        """Correct observed flux/error for Galactic extinction using dustmaps."""
         sfd_query = _get_sfd_query()
         coord = SkyCoord(float(ra) * u.deg, float(dec) * u.deg, frame='icrs')
         ebv = float(np.asarray(sfd_query(coord)))
@@ -1277,17 +681,20 @@ class QSOFit:
         return self.flux
 
     def _RestFrame(self, lam, flux, err, z):
+        """Convert observed-frame spectra to rest-frame convention."""
         self.wave = lam / (1 + z)
         self.flux = flux * (1 + z)
         self.err = err * (1 + z)
         return self.wave, self.flux, self.err
 
     def _OrignialSpec(self, wave, flux, err):
+        """Cache the pre-modeling spectrum for plotting/debugging."""
         self.wave_prereduced = wave
         self.flux_prereduced = flux
         self.err_prereduced = err
 
     def _CalculateSN(self, wave, flux, alter=True):
+        """Estimate continuum S/N from standard windows or robust fallback."""
         ind5100 = np.where((wave > 5080) & (wave < 5130), True, False)
         ind3000 = np.where((wave > 3000) & (wave < 3050), True, False)
         ind1350 = np.where((wave > 1325) & (wave < 1375), True, False)
@@ -1311,12 +718,15 @@ class QSOFit:
         return self.SN_ratio_conti
 
     def _host_fraction_at_wave(self, w0):
+        """Return host/continuum flux fraction at wavelength `w0`."""
         return self._component_fraction_at_wave(self.host, w0)
 
     def _bc_fraction_at_wave(self, w0):
+        """Return Balmer-continuum/continuum flux fraction at wavelength `w0`."""
         return self._component_fraction_at_wave(self.f_bc_model, w0)
 
     def _component_fraction_at_wave(self, component, w0):
+        """Return component fraction relative to fitted continuum at `w0`."""
         if len(self.wave) == 0:
             return -1.
         comp = np.interp(w0, self.wave, component, left=np.nan, right=np.nan)
@@ -1325,15 +735,21 @@ class QSOFit:
             return -1.
         return float(comp / total)
 
-    def save_result(self, conti_result, conti_result_type, conti_result_name, line_result, line_result_type, line_result_name, save_fits_path, save_fits_name):
+    def save_result(self, conti_result, conti_result_type, conti_result_name, line_result, line_result_type, line_result_name, save_fits_name):
+        """Write continuum+line summary table to a pandas CSV file."""
         self.all_result = np.concatenate([conti_result, line_result])
         self.all_result_type = np.concatenate([conti_result_type, line_result_type])
         self.all_result_name = np.concatenate([conti_result_name, line_result_name])
-        t = Table(self.all_result, names=(self.all_result_name), dtype=self.all_result_type)
-        t.write(os.path.join(save_fits_path, save_fits_name + '.fits'), format='fits', overwrite=True)
+        df = pd.DataFrame([self.all_result], columns=self.all_result_name)
+        out_dir = self.output_path if self.output_path is not None else '.'
+        os.makedirs(out_dir, exist_ok=True)
+        out_file = os.path.join(out_dir, save_fits_name + '.csv')
+        df.to_csv(out_file, index=False)
+        print(f"Saved results table: {out_file}")
         return
 
     def _posterior_series(self, param_names=None, max_vector_elems=2):
+        """Flatten posterior samples into labeled 1D series for diagnostics."""
         if not hasattr(self, 'numpyro_samples') or self.numpyro_samples is None:
             return []
 
@@ -1367,6 +783,7 @@ class QSOFit:
         return out
 
     def plot_trace(self, param_names=None, max_vector_elems=2, save_fig_path='.', save_fig_name=None):
+        """Plot posterior trace series for selected parameters."""
         series = self._posterior_series(param_names=param_names, max_vector_elems=max_vector_elems)
         if len(series) == 0:
             return None
@@ -1385,12 +802,15 @@ class QSOFit:
         plt.show()
         if self.save_fig:
             out_name = f'{self.sdss_name}_trace.pdf' if save_fig_name is None else save_fig_name
-            fig.savefig(os.path.join(save_fig_path, out_name))
+            out_file = os.path.join(save_fig_path, out_name)
+            fig.savefig(out_file)
+            print(f"Saved trace plot: {out_file}")
             plt.close(fig)
         self.trace_fig = fig
         return fig
 
     def plot_corner(self, param_names=None, max_vector_elems=2, max_dims=8, bins=30, save_fig_path='.', save_fig_name=None):
+        """Plot a simple corner-style posterior projection matrix."""
         series = self._posterior_series(param_names=param_names, max_vector_elems=max_vector_elems)
         if len(series) == 0:
             return None
@@ -1425,24 +845,36 @@ class QSOFit:
         plt.show()
         if self.save_fig:
             out_name = f'{self.sdss_name}_corner.pdf' if save_fig_name is None else save_fig_name
-            fig.savefig(os.path.join(save_fig_path, out_name))
+            out_file = os.path.join(save_fig_path, out_name)
+            fig.savefig(out_file)
+            print(f"Saved corner plot: {out_file}")
             plt.close(fig)
         self.corner_fig = fig
         return fig
 
     def plot_fig(self, save_fig_path='.', broad_fwhm=1200, plot_legend=True, ylims=None, plot_residual=True, show_title=True,
                  plot_1sigma=True, sigma_alpha=0.12):
+        """Plot data, model components, line decomposition, and residuals."""
         matplotlib.rc('xtick', labelsize=20)
         matplotlib.rc('ytick', labelsize=20)
-        fig, ax = plt.subplots(1, 1, figsize=(15, 6))
+        if plot_residual:
+            fig, (ax, ax_resid) = plt.subplots(
+                2,
+                1,
+                figsize=(15, 8),
+                sharex=True,
+                gridspec_kw={'height_ratios': [4.0, 1.2], 'hspace': 0.05},
+            )
+        else:
+            fig, ax = plt.subplots(1, 1, figsize=(15, 6))
+            ax_resid = None
 
         if plot_1sigma and hasattr(self, 'pred_bands'):
             band_colors = {
                 'total_model': 'b',
                 'host': 'purple',
                 'PL': 'orange',
-                'FeII_UV': 'c',
-                'FeII_opt': 'teal',
+                'FeII': 'teal',
                 'Balmer_cont': 'y',
                 'continuum': 'darkorange',
                 'lines': 'crimson',
@@ -1459,8 +891,8 @@ class QSOFit:
         ax.plot(self.wave, self.model_total, color='b', lw=1.8, label='total model', zorder=6)
         ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host', zorder=4)
         ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, label='PL', zorder=5)
-        ax.plot(self.wave, self.f_fe_mgii_model, color='c', lw=1.2, label='FeII UV', zorder=5)
-        ax.plot(self.wave, self.f_fe_balmer_model, color='teal', lw=1.2, label='FeII opt', zorder=5)
+        fe_total_model = self.f_fe_mgii_model + self.f_fe_balmer_model
+        ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='FeII', zorder=5)
         ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer cont.', zorder=5)
         ax.plot(self.wave, self.f_conti_model, color='darkorange', lw=1.5, label='continuum', zorder=5)
         if len(self.f_line_model) == len(self.wave):
@@ -1498,8 +930,6 @@ class QSOFit:
                     ax.plot(self.wave, prof, color='green', lw=0.7, alpha=0.25, zorder=3, label=lbl)
                     drew_narrow_label = True
 
-        if show_title:
-            ax.set_title(f"{self.sdss_name}   z = {np.round(float(self.z), 4)}", fontsize=20)
         ax.set_xlim(self.wave.min(), self.wave.max())
         if ylims is None:
             yplot = np.concatenate([
@@ -1514,29 +944,30 @@ class QSOFit:
         else:
             ax.set_ylim(0, ylims[1])
 
-        if plot_residual and len(self.model_total) == len(self.wave):
+        if plot_residual and len(self.model_total) == len(self.wave) and ax_resid is not None:
             resid = self.flux - self.model_total
-            y1, y2 = ax.get_ylim()
-            resid_level = y1 + 0.08 * (y2 - y1)
-            ax.plot(self.wave, resid + resid_level, color='gray', ls='dotted', lw=1, label='resid', zorder=1)
-            ax.axhline(resid_level, color='gray', ls='--', lw=0.8)
+            ax_resid.plot(self.wave, resid, color='gray', ls='dotted', lw=1.0, zorder=2)
+            ax_resid.axhline(0.0, color='k', ls='--', lw=0.8, zorder=1)
+            r = resid[np.isfinite(resid)]
+            if r.size > 0:
+                rlim = np.nanpercentile(np.abs(r), 99)
+                if np.isfinite(rlim) and rlim > 0:
+                    ax_resid.set_ylim(-1.15 * rlim, 1.15 * rlim)
+            ax_resid.set_ylabel('resid', fontsize=13)
+            ax_resid.grid(alpha=0.2)
 
-        ax.set_xlabel(r'Rest Wavelength (\AA)', fontsize=20)
-        ax.set_ylabel(r'$f_{\lambda}$', fontsize=20)
+        if plot_residual and ax_resid is not None:
+            ax_resid.set_xlabel(r'$\lambda_{\mathrm{rest}}\ (\AA)$', fontsize=20)
+        else:
+            ax.set_xlabel(r'$\lambda_{\mathrm{rest}}\ (\AA)$', fontsize=20)
+        ax.set_ylabel(r'$f_{\lambda}\ (10^{-17}\ \mathrm{erg}\ \mathrm{s}^{-1}\ \mathrm{cm}^{-2}\ \AA^{-1})$', fontsize=20)
         if plot_legend:
             ax.legend(frameon=False, fontsize=9, ncol=2)
         plt.show()
         if self.save_fig:
-            fig.savefig(os.path.join(save_fig_path, self.sdss_name + '.pdf'))
+            out_file = os.path.join(save_fig_path, self.sdss_name + '.pdf')
+            fig.savefig(out_file)
+            print(f"Saved spectrum plot: {out_file}")
             plt.close(fig)
         self.fig = fig
         return
-
-
-# Notes
-# -----
-# 1) This restores the standard AGN continuum pieces in the Bayesian model.
-# 2) The dust term is a JAX-safe attenuation surrogate instead of the exact dust_extinction call.
-# 3) Plotting is restored in a PyQSOFit-like layered style.
-# 4) The main remaining extension would be reproducing every legacy derived summary field exactly,
-#    but the model components and plotting interface are now back in place.
