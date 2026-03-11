@@ -138,6 +138,22 @@ q.Fit(
 )
 ```
 
+### Fast fitting option (Optax)
+
+If you want speed over full posterior sampling, use:
+
+```python
+q.Fit(
+    fit_method="optax",
+    optax_steps=1500,
+    optax_lr=1e-2,
+    plot_fig=True,
+    save_fig=False,
+)
+```
+
+This runs a staged MAP optimization (continuum warm start, then full model) and is typically much faster than NUTS.
+
 Optional: override any defaults by passing `prior_config`:
 
 ```python

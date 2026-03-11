@@ -43,7 +43,10 @@ import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from numpyro.infer import MCMC, NUTS, Predictive, init_to_value
+import optax
+from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
+from numpyro.infer.autoguide import AutoDelta
+from numpyro.optim import optax_to_numpyro
 
 from dsps import load_ssp_templates
 from dustmaps.sfd import SFDQuery
@@ -671,6 +674,7 @@ class QSOFit:
             fit_fe=True,
             fit_bc=True,
             fit_poly=False,
+            fit_method='nuts',
             verbose=False,
             fsps_age_grid=(0.1, 0.3, 1.0, 3.0, 10.0),
             fsps_logzsol_grid=(-1.0, -0.5, 0.0, 0.2),
@@ -680,6 +684,8 @@ class QSOFit:
             nuts_samples=1000,
             nuts_chains=1,
             nuts_target_accept=0.9,
+            optax_steps=2000,
+            optax_lr=1e-2,
             kwargs_plot=None):
 
         if kwargs_plot is None:
@@ -746,21 +752,38 @@ class QSOFit:
         self._CalculateSN(self.wave, self.flux)
         self._OrignialSpec(self.wave, self.flux, self.err)
 
-        self.run_fsps_numpyro_fit(
-            num_warmup=nuts_warmup,
-            num_samples=nuts_samples,
-            num_chains=nuts_chains,
-            target_accept_prob=nuts_target_accept,
-            age_grid_gyr=fsps_age_grid,
-            logzsol_grid=fsps_logzsol_grid,
-            prior_config=prior_config,
-            dsps_ssp_fn=dsps_ssp_fn,
-            use_lines=fit_lines,
-            decompose_host=decompose_host,
-            fit_fe=fit_fe,
-            fit_bc=fit_bc,
-            fit_poly=fit_poly,
-        )
+        if fit_method == 'nuts':
+            self.run_fsps_numpyro_fit(
+                num_warmup=nuts_warmup,
+                num_samples=nuts_samples,
+                num_chains=nuts_chains,
+                target_accept_prob=nuts_target_accept,
+                age_grid_gyr=fsps_age_grid,
+                logzsol_grid=fsps_logzsol_grid,
+                prior_config=prior_config,
+                dsps_ssp_fn=dsps_ssp_fn,
+                use_lines=fit_lines,
+                decompose_host=decompose_host,
+                fit_fe=fit_fe,
+                fit_bc=fit_bc,
+                fit_poly=fit_poly,
+            )
+        elif fit_method == 'optax':
+            self.run_fsps_optax_fit(
+                num_steps=optax_steps,
+                learning_rate=optax_lr,
+                age_grid_gyr=fsps_age_grid,
+                logzsol_grid=fsps_logzsol_grid,
+                prior_config=prior_config,
+                dsps_ssp_fn=dsps_ssp_fn,
+                use_lines=fit_lines,
+                decompose_host=decompose_host,
+                fit_fe=fit_fe,
+                fit_bc=fit_bc,
+                fit_poly=fit_poly,
+            )
+        else:
+            raise ValueError(f"Unknown fit_method='{fit_method}'. Use 'nuts' or 'optax'.")
 
         if save_result:
             self.save_result(self.conti_result, self.conti_result_type, self.conti_result_name,
@@ -908,6 +931,184 @@ class QSOFit:
         )
 
         self.numpyro_mcmc = mcmc
+        self._consume_posterior_outputs(
+            samples=samples,
+            pred_out=pred_out,
+            fsps_grid=fsps_grid,
+            tied_line_meta=tied_line_meta,
+            use_lines=use_lines,
+            decompose_host=decompose_host,
+        )
+
+    def run_fsps_optax_fit(self, num_steps=2000, learning_rate=1e-2,
+                           age_grid_gyr=(0.1, 0.3, 1.0, 3.0, 10.0),
+                           logzsol_grid=(-1.0, -0.5, 0.0, 0.2),
+                           prior_config=None,
+                           dsps_ssp_fn='tempdata.h5',
+                           use_lines=True,
+                           decompose_host=True,
+                           fit_fe=True,
+                           fit_bc=True,
+                           fit_poly=False):
+        wave = np.asarray(self.wave, dtype=float)
+        flux = np.asarray(self.flux, dtype=float)
+        err = np.asarray(self.err, dtype=float)
+
+        if prior_config is None:
+            prior_config = build_default_prior_config(flux)
+        conti_priors = prior_config.get('conti_priors', {})
+        line_table = _extract_line_table_from_prior_config(prior_config)
+
+        if use_lines and line_table is None:
+            raise ValueError(
+                "fit_lines=True requires line priors/table in prior_config. "
+                "Pass prior_config['line_priors'] (or prior_config['line']['table'])."
+            )
+
+        if line_table is not None:
+            tied_line_meta = build_tied_line_meta_from_linelist(line_table, wave)
+        else:
+            tied_line_meta = {
+                'n_lines': 0,
+                'n_vgroups': 0,
+                'n_wgroups': 0,
+                'n_fgroups': 0,
+                'ln_lambda0': _np_to_jnp(np.array([], dtype=float)),
+                'vgroup': np.array([], dtype=int),
+                'wgroup': np.array([], dtype=int),
+                'fgroup': np.array([], dtype=int),
+                'flux_ratio': np.array([], dtype=float),
+                'dmu_init_group': np.array([], dtype=float),
+                'dmu_min_group': np.array([], dtype=float),
+                'dmu_max_group': np.array([], dtype=float),
+                'sig_init_group': np.array([], dtype=float),
+                'sig_min_group': np.array([], dtype=float),
+                'sig_max_group': np.array([], dtype=float),
+                'amp_init_group': np.array([], dtype=float),
+                'amp_min_group': np.array([], dtype=float),
+                'amp_max_group': np.array([], dtype=float),
+                'names': [],
+                'compnames': [],
+                'line_lambda': np.array([], dtype=float),
+            }
+        fsps_grid = build_fsps_template_grid(
+            wave_out=wave,
+            age_grid_gyr=age_grid_gyr,
+            logzsol_grid=logzsol_grid,
+            dsps_ssp_fn=dsps_ssp_fn,
+        )
+        self.tied_line_meta = tied_line_meta
+
+        def _run_svi(guide, steps, use_lines_i, fit_fe_i, fit_bc_i, fit_poly_i, decompose_host_i):
+            optimizer = optax_to_numpyro(optax.adam(learning_rate))
+            svi = SVI(qso_fsps_joint_model, guide, optimizer, loss=Trace_ELBO())
+            key = jax.random.PRNGKey(0)
+            result = svi.run(
+                key,
+                int(steps),
+                wave=wave,
+                flux=flux,
+                err=err,
+                conti_priors=conti_priors,
+                tied_line_meta=tied_line_meta,
+                fsps_grid=fsps_grid,
+                fe_uv_wave=self.fe_uv_wave,
+                fe_uv_flux=self.fe_uv_flux,
+                fe_op_wave=self.fe_op_wave,
+                fe_op_flux=self.fe_op_flux,
+                use_lines=use_lines_i,
+                prior_config=prior_config,
+                decompose_host=decompose_host_i,
+                fit_fe=fit_fe_i,
+                fit_bc=fit_bc_i,
+                fit_poly=fit_poly_i,
+                progress_bar=self.verbose,
+            )
+            return svi, result
+
+        # Stage 1: warm start on simpler landscape (continuum/host only).
+        n1 = max(100, int(num_steps // 3))
+        guide1 = AutoDelta(
+            qso_fsps_joint_model,
+            init_loc_fn=init_to_value(values={'gal_v_kms': 0.0, 'gal_sigma_kms': 150.0}),
+        )
+        svi1, res1 = _run_svi(
+            guide1,
+            n1,
+            use_lines_i=False,
+            fit_fe_i=False,
+            fit_bc_i=False,
+            fit_poly_i=False,
+            decompose_host_i=decompose_host,
+        )
+        map1 = guide1.median(res1.params)
+
+        # Stage 2: full model initialized from stage-1 MAP for overlapping parameters.
+        n2 = max(100, int(num_steps - n1))
+        guide2 = AutoDelta(
+            qso_fsps_joint_model,
+            init_loc_fn=init_to_value(values=map1),
+        )
+        svi, res2 = _run_svi(
+            guide2,
+            n2,
+            use_lines_i=use_lines,
+            fit_fe_i=fit_fe,
+            fit_bc_i=fit_bc,
+            fit_poly_i=fit_poly,
+            decompose_host_i=decompose_host,
+        )
+
+        svi_state = res2.state
+        svi_params = res2.params
+        losses = np.concatenate([np.asarray(res1.losses), np.asarray(res2.losses)])
+        map_point = guide2.median(svi_params)
+        samples = {k: np.asarray(v)[None, ...] for k, v in map_point.items()}
+        rng_key = jax.random.PRNGKey(0)
+
+        pred = Predictive(
+            qso_fsps_joint_model,
+            posterior_samples={k: jnp.asarray(v) for k, v in samples.items()},
+            return_sites=['f_pl_model', 'f_fe_mgii_model', 'f_fe_balmer_model', 'f_bc_model', 'f_poly_model',
+                          'agn_model', 'gal_model', 'line_model', 'continuum_model', 'model',
+                          'fsps_weights', 'line_amp_per_component', 'line_mu_per_component', 'line_sig_per_component'],
+        )
+        pred_out = pred(
+            rng_key,
+            wave=wave,
+            flux=None,
+            err=err,
+            conti_priors=conti_priors,
+            tied_line_meta=tied_line_meta,
+            fsps_grid=fsps_grid,
+            fe_uv_wave=self.fe_uv_wave,
+            fe_uv_flux=self.fe_uv_flux,
+            fe_op_wave=self.fe_op_wave,
+            fe_op_flux=self.fe_op_flux,
+            use_lines=use_lines,
+            prior_config=prior_config,
+            decompose_host=decompose_host,
+            fit_fe=fit_fe,
+            fit_bc=fit_bc,
+            fit_poly=fit_poly,
+        )
+
+        self.numpyro_mcmc = None
+        self.svi = svi
+        self.svi_state = svi_state
+        self.svi_params = svi_params
+        self.optax_losses = losses
+        self._consume_posterior_outputs(
+            samples=samples,
+            pred_out=pred_out,
+            fsps_grid=fsps_grid,
+            tied_line_meta=tied_line_meta,
+            use_lines=use_lines,
+            decompose_host=decompose_host,
+        )
+
+    def _consume_posterior_outputs(self, samples, pred_out, fsps_grid, tied_line_meta, use_lines, decompose_host):
+        flux = np.asarray(self.flux, dtype=float)
         self.numpyro_samples = samples
         self.fsps_grid = fsps_grid
         self.pred_out = pred_out
@@ -931,7 +1132,6 @@ class QSOFit:
         self.line_flux = flux - self.f_conti_model
         self.decomposed = True
 
-        # Cache 1-sigma (16th/84th percentile) prediction bands for plotting.
         def _band(x):
             a = np.asarray(x)
             return np.percentile(a, 16, axis=0), np.percentile(a, 84, axis=0)
@@ -977,6 +1177,7 @@ class QSOFit:
         self.frac_host_2500 = self._host_fraction_at_wave(2500.0)
         self.frac_bc_2500 = self._bc_fraction_at_wave(2500.0)
 
+        n_samp = int(np.asarray(next(iter(samples.values()))).shape[0]) if len(samples) > 0 else 1
         if 'cont_norm' in samples:
             cont_samp = np.asarray(samples['cont_norm'])
             if decompose_host and 'log_frac_host' in samples:
@@ -987,7 +1188,7 @@ class QSOFit:
         elif 'PL_norm' in samples:
             pl_norm_samp = np.asarray(samples['PL_norm'])
         else:
-            pl_norm_samp = np.full((num_samples,), np.nan)
+            pl_norm_samp = np.full((n_samp,), np.nan)
 
         self.conti_result = np.array([
             self.ra, self.dec, str(self.plateid), str(self.mjd), str(self.fiberid), self.z,
