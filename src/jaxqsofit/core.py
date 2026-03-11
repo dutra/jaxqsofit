@@ -1045,6 +1045,16 @@ class QSOFit:
             fig, ax = plt.subplots(1, 1, figsize=(15, 6))
             ax_resid = None
 
+        flux_ref = float(np.nanpercentile(np.abs(self.flux[np.isfinite(self.flux)]), 95)) if np.any(np.isfinite(self.flux)) else 1.0
+        comp_floor = max(1e-8, 0.005 * flux_ref)
+
+        def _show_component(arr):
+            arr = np.asarray(arr, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                return False
+            return float(np.nanmax(np.abs(arr))) >= comp_floor
+
         if plot_1sigma and hasattr(self, 'pred_bands'):
             band_colors = {
                 'total_model': 'b',
@@ -1053,25 +1063,38 @@ class QSOFit:
                 'FeII': 'teal',
                 'Balmer_cont': 'y',
                 'lines': 'lightskyblue',
-                'conti_plus_lines': 'green',
             }
             for key, color in band_colors.items():
                 if key not in self.pred_bands:
                     continue
                 lo, hi = self.pred_bands[key]
-                if len(lo) == len(self.wave):
+                if len(lo) == len(self.wave) and _show_component(0.5 * (np.asarray(lo) + np.asarray(hi))):
                     ax.fill_between(self.wave, lo, hi, color=color, alpha=sigma_alpha, linewidth=0, zorder=0)
 
         ax.plot(self.wave_prereduced, self.flux_prereduced, 'k', lw=1, label='data', zorder=2)
         ax.plot(self.wave, self.model_total, color='b', lw=1.8, label='total model', zorder=6)
-        ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host', zorder=4)
-        ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, label='PL', zorder=5)
+        if _show_component(self.host):
+            ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host', zorder=4)
+        else:
+            ax.plot(self.wave, self.host, color='purple', lw=1.8, zorder=4)
+        if _show_component(self.f_pl_model):
+            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, label='PL', zorder=5)
+        else:
+            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, zorder=5)
         fe_total_model = self.f_fe_mgii_model + self.f_fe_balmer_model
-        ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='FeII', zorder=5)
-        ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer cont.', zorder=5)
+        if _show_component(fe_total_model):
+            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='FeII', zorder=5)
+        else:
+            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, zorder=5)
+        if _show_component(self.f_bc_model):
+            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer cont.', zorder=5)
+        else:
+            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, zorder=5)
         if len(self.f_line_model) == len(self.wave):
-            ax.plot(self.wave, self.f_line_model, color='lightskyblue', lw=1.5, label='lines', zorder=5)
-            ax.plot(self.wave, self.f_conti_model + self.f_line_model, color='green', lw=1.2, label='conti+lines', zorder=5)
+            if _show_component(self.f_line_model):
+                ax.plot(self.wave, self.f_line_model, color='lightskyblue', lw=1.5, label='lines', zorder=5)
+            else:
+                ax.plot(self.wave, self.f_line_model, color='lightskyblue', lw=1.5, zorder=5)
 
         # Plot individual Gaussian line components: broad (*_br) in red, narrow in green.
         if (hasattr(self, 'line_component_amp_median')
@@ -1083,6 +1106,7 @@ class QSOFit:
             comp_labels = self.tied_line_meta.get('names', [''] * len(self.line_component_amp_median))
             drew_broad_label = False
             drew_narrow_label = False
+            show_line_leg = _show_component(self.f_line_model)
             for i in range(len(self.line_component_amp_median)):
                 amp = float(self.line_component_amp_median[i])
                 mu = float(self.line_component_mu_median[i])
@@ -1096,11 +1120,11 @@ class QSOFit:
                 cname = str(comp_labels[i]).lower()
                 is_broad = cname.endswith('_br') or ('_br' in cname)
                 if is_broad:
-                    lbl = 'broad comps' if not drew_broad_label else None
+                    lbl = 'broad comps' if (show_line_leg and not drew_broad_label) else None
                     ax.plot(self.wave, prof, color='red', lw=0.7, alpha=0.35, zorder=3, label=lbl)
                     drew_broad_label = True
                 else:
-                    lbl = 'narrow comps' if not drew_narrow_label else None
+                    lbl = 'narrow comps' if (show_line_leg and not drew_narrow_label) else None
                     ax.plot(self.wave, prof, color='green', lw=0.7, alpha=0.25, zorder=3, label=lbl)
                     drew_narrow_label = True
 
@@ -1154,13 +1178,13 @@ class QSOFit:
                 rlim = np.nanpercentile(np.abs(r), 99)
                 if np.isfinite(rlim) and rlim > 0:
                     ax_resid.set_ylim(-1.15 * rlim, 1.15 * rlim)
-            ax_resid.set_ylabel('resid', fontsize=13)
+            ax_resid.set_ylabel('resid', fontsize=20)
             self._style_axis(ax_resid)
 
         if plot_residual and ax_resid is not None:
-            ax_resid.set_xlabel(r'$\lambda_{\mathrm{rest}}\ (\AA)$', fontsize=20)
+            ax_resid.set_xlabel(r'Rest Wavelength ($\AA$)', fontsize=20)
         else:
-            ax.set_xlabel(r'$\lambda_{\mathrm{rest}}\ (\AA)$', fontsize=20)
+            ax.set_xlabel(r'Rest Wavelength ($\AA$)', fontsize=20)
         ax.set_ylabel(r'$f_{\lambda}\ (10^{-17}\ \mathrm{erg}\ \mathrm{s}^{-1}\ \mathrm{cm}^{-2}\ \AA^{-1})$', fontsize=20)
         self._style_axis(ax)
         if plot_legend:
