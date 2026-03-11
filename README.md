@@ -1,5 +1,9 @@
 # JaxQSOFit
 
+<p align="center">
+  <img src="logo.png" alt="JaxQSOFit logo" width="220">
+</p>
+
 Bayesian quasar spectral fitting with JAX + NumPyro, including:
 
 - AGN continuum (power law)
@@ -10,6 +14,17 @@ Bayesian quasar spectral fitting with JAX + NumPyro, including:
 - Student-t likelihood (robust to outliers/absorption)
 
 The main implementation is in [`src/jaxqsofit/core.py`](./src/jaxqsofit/core.py).
+
+## Key Differences vs PyQSOFit
+
+JaxQSOFit is designed around a **joint Bayesian model** of AGN and host components, rather than fitting them in separate stages.
+
+- **Joint host+AGN inference**:
+  Host galaxy SPS (DSPS SSP mixture + LOSVD) is fit simultaneously with AGN continuum and lines.
+- **More robust for complex spectra**:
+  This joint treatment reduces AGN/host degeneracies and yields more stable parameters when spectra have strong blending, absorption, or mixed host contamination.
+- **Probabilistic uncertainties**:
+  NumPyro/NUTS produces posterior distributions for continuum, host, Fe, Balmer, and line parameters in one consistent model.
 
 ## Requirements
 
