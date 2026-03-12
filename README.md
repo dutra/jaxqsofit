@@ -84,10 +84,9 @@ This code expects an HDF5 SSP file path passed as `dsps_ssp_fn`, e.g. `tempdata.
 
 ```
 curl -L -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5
-python dsps_ssp_fn="tempdata.h5"
 ```
 
-Always set `dsps_ssp_fn` to the HDF5 SSP template file you want to use.
+Always set `dsps_ssp_fn="tempdata.h5"` to the HDF5 SSP template file you want to use.
 
 ### 4. Configure dustmaps SFD (one-time)
 
