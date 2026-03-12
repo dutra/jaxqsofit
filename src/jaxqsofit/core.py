@@ -87,6 +87,7 @@ class QSOFit:
             wave_range=None, wave_mask=None, save_fits_name=None,
             fit_lines=True, save_result=True, plot_fig=True, save_fig=True,
             decompose_host=True,
+            fit_pl=True,
             fit_fe=True,
             fit_bc=False,
             fit_poly=True,
@@ -128,6 +129,8 @@ class QSOFit:
             If True, save rendered figures.
         decompose_host : bool, optional
             Enable/disable host SPS decomposition.
+        fit_pl : bool, optional
+            Enable/disable AGN power-law component.
         fit_fe : bool, optional
             Enable/disable FeII components.
         fit_bc : bool, optional
@@ -242,6 +245,7 @@ class QSOFit:
                 dsps_ssp_fn=dsps_ssp_fn,
                 use_lines=fit_lines,
                 decompose_host=decompose_host,
+                fit_pl=fit_pl,
                 fit_fe=fit_fe,
                 fit_bc=fit_bc,
                 fit_poly=fit_poly,
@@ -256,6 +260,7 @@ class QSOFit:
                 dsps_ssp_fn=dsps_ssp_fn,
                 use_lines=fit_lines,
                 decompose_host=decompose_host,
+                fit_pl=fit_pl,
                 fit_fe=fit_fe,
                 fit_bc=fit_bc,
                 fit_poly=fit_poly,
@@ -274,6 +279,7 @@ class QSOFit:
                 dsps_ssp_fn=dsps_ssp_fn,
                 use_lines=fit_lines,
                 decompose_host=decompose_host,
+                fit_pl=fit_pl,
                 fit_fe=fit_fe,
                 fit_bc=fit_bc,
                 fit_poly=fit_poly,
@@ -296,6 +302,7 @@ class QSOFit:
                              dsps_ssp_fn='tempdata.h5',
                              use_lines=True,
                              decompose_host=True,
+                             fit_pl=True,
                              fit_fe=True,
                              fit_bc=True,
                              fit_poly=False,
@@ -318,7 +325,7 @@ class QSOFit:
             Prior/config dictionary for model blocks.
         dsps_ssp_fn : str, optional
             DSPS SSP template HDF5 path.
-        use_lines, decompose_host, fit_fe, fit_bc, fit_poly : bool, optional
+        use_lines, decompose_host, fit_pl, fit_fe, fit_bc, fit_poly : bool, optional
             Component toggles for model blocks.
         init_values : dict or None, optional
             Optional initial values for ``init_to_value``.
@@ -392,6 +399,7 @@ class QSOFit:
             use_lines=use_lines,
             prior_config=prior_config,
             decompose_host=decompose_host,
+            fit_pl=fit_pl,
             fit_fe=fit_fe,
             fit_bc=fit_bc,
             fit_poly=fit_poly,
@@ -420,6 +428,7 @@ class QSOFit:
             use_lines=use_lines,
             prior_config=prior_config,
             decompose_host=decompose_host,
+            fit_pl=fit_pl,
             fit_fe=fit_fe,
             fit_bc=fit_bc,
             fit_poly=fit_poly,
@@ -442,6 +451,7 @@ class QSOFit:
                            dsps_ssp_fn='tempdata.h5',
                            use_lines=True,
                            decompose_host=True,
+                           fit_pl=True,
                            fit_fe=True,
                            fit_bc=True,
                            fit_poly=False):
@@ -461,7 +471,7 @@ class QSOFit:
             Prior/config dictionary for model blocks.
         dsps_ssp_fn : str, optional
             DSPS SSP template HDF5 path.
-        use_lines, decompose_host, fit_fe, fit_bc, fit_poly : bool, optional
+        use_lines, decompose_host, fit_pl, fit_fe, fit_bc, fit_poly : bool, optional
             Component toggles for model blocks.
         """
         wave = np.asarray(self.wave, dtype=float)
@@ -513,7 +523,7 @@ class QSOFit:
         )
         self.tied_line_meta = tied_line_meta
 
-        def _run_svi(guide, steps, use_lines_i, fit_fe_i, fit_bc_i, fit_poly_i, decompose_host_i):
+        def _run_svi(guide, steps, use_lines_i, fit_pl_i, fit_fe_i, fit_bc_i, fit_poly_i, decompose_host_i):
             """Run an SVI stage and return optimizer state/results."""
             optimizer = optax_to_numpyro(optax.adam(learning_rate))
             svi = SVI(qso_fsps_joint_model, guide, optimizer, loss=Trace_ELBO())
@@ -534,6 +544,7 @@ class QSOFit:
                 use_lines=use_lines_i,
                 prior_config=prior_config,
                 decompose_host=decompose_host_i,
+                fit_pl=fit_pl_i,
                 fit_fe=fit_fe_i,
                 fit_bc=fit_bc_i,
                 fit_poly=fit_poly_i,
@@ -551,6 +562,7 @@ class QSOFit:
             guide1,
             n1,
             use_lines_i=False,
+            fit_pl_i=fit_pl,
             fit_fe_i=False,
             fit_bc_i=False,
             fit_poly_i=False,
@@ -568,6 +580,7 @@ class QSOFit:
             guide2,
             n2,
             use_lines_i=use_lines,
+            fit_pl_i=fit_pl,
             fit_fe_i=fit_fe,
             fit_bc_i=fit_bc,
             fit_poly_i=fit_poly,
@@ -603,6 +616,7 @@ class QSOFit:
             use_lines=use_lines,
             prior_config=prior_config,
             decompose_host=decompose_host,
+            fit_pl=fit_pl,
             fit_fe=fit_fe,
             fit_bc=fit_bc,
             fit_poly=fit_poly,
@@ -632,6 +646,7 @@ class QSOFit:
                                 dsps_ssp_fn='tempdata.h5',
                                 use_lines=True,
                                 decompose_host=True,
+                                fit_pl=True,
                                 fit_fe=True,
                                 fit_bc=True,
                                 fit_poly=False):
@@ -657,7 +672,7 @@ class QSOFit:
             Prior/config dictionary for model blocks.
         dsps_ssp_fn : str, optional
             DSPS SSP template HDF5 path.
-        use_lines, decompose_host, fit_fe, fit_bc, fit_poly : bool, optional
+        use_lines, decompose_host, fit_pl, fit_fe, fit_bc, fit_poly : bool, optional
             Component toggles for model blocks.
         """
         self.run_fsps_optax_fit(
@@ -669,6 +684,7 @@ class QSOFit:
             dsps_ssp_fn=dsps_ssp_fn,
             use_lines=use_lines,
             decompose_host=decompose_host,
+            fit_pl=fit_pl,
             fit_fe=fit_fe,
             fit_bc=fit_bc,
             fit_poly=fit_poly,
@@ -685,6 +701,7 @@ class QSOFit:
             dsps_ssp_fn=dsps_ssp_fn,
             use_lines=use_lines,
             decompose_host=decompose_host,
+            fit_pl=fit_pl,
             fit_fe=fit_fe,
             fit_bc=fit_bc,
             fit_poly=fit_poly,
@@ -784,19 +801,25 @@ class QSOFit:
             cont_samp = np.asarray(samples['cont_norm'])
             if decompose_host and 'log_frac_host' in samples:
                 frac_host_samp = 1.0 / (1.0 + np.exp(-np.asarray(samples['log_frac_host'])))
-                pl_norm_samp = cont_samp * (1.0 - frac_host_samp)
+                agn_samp = cont_samp * (1.0 - frac_host_samp)
             else:
-                pl_norm_samp = cont_samp
+                agn_samp = cont_samp
+            pl_norm_samp = agn_samp
         elif 'PL_norm' in samples:
             pl_norm_samp = np.asarray(samples['PL_norm'])
         else:
             pl_norm_samp = np.full((n_samp,), np.nan)
-
+        if 'PL_slope' in samples:
+            pl_slope_med = float(np.nanmedian(np.asarray(samples['PL_slope'])))
+            pl_slope_err = float(np.nanstd(np.asarray(samples['PL_slope'])))
+        else:
+            pl_slope_med = np.nan
+            pl_slope_err = np.nan
         self.conti_result = np.array([
             self.ra, self.dec, str(self.plateid), str(self.mjd), str(self.fiberid), self.z,
             self.SN_ratio_conti,
             float(np.nanmedian(pl_norm_samp)), float(np.nanstd(pl_norm_samp)),
-            float(np.median(np.asarray(samples['PL_slope']))), float(np.std(np.asarray(samples['PL_slope']))),
+            pl_slope_med, pl_slope_err,
             gal_sig, gal_sig_err, gal_v, gal_v_err,
             self.frac_host_4200, self.frac_host_5100, self.frac_host_2500, self.frac_bc_2500,
             age_weighted, metal_weighted,

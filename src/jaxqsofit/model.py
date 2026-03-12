@@ -58,7 +58,7 @@ def _many_gauss_lnlam(lnlam, amps, mus, sigs):
 
 def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms):
     """Apply LOS velocity shift and Gaussian broadening to one spectrum."""
-    dln = jnp.median(jnp.diff(lnwave))
+    dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
     sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
     kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=128)
@@ -121,7 +121,7 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     bc = jnp.where(wave <= lam_be, bc, 0.0)
 
     lnwave = jnp.log(wave)
-    dln = jnp.median(jnp.diff(lnwave))
+    dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(balmer_vel / C_KMS, 1e-5)
     sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
     kernel = _gaussian_kernel1d(sigma_pix)
@@ -428,7 +428,7 @@ def build_tied_line_meta_from_linelist(linelist, wave):
 
 def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_grid,
                          fe_uv_wave, fe_uv_flux, fe_op_wave, fe_op_flux, use_lines=True,
-                         prior_config=None, decompose_host=True, fit_fe=True, fit_bc=True, fit_poly=False):
+                         prior_config=None, decompose_host=True, fit_pl=True, fit_fe=True, fit_bc=True, fit_poly=False):
     """Joint AGN+host spectral forward model for NumPyro inference."""
     wave = _np_to_jnp(wave)
     flux = _np_to_jnp(flux)
@@ -469,25 +469,33 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         frac_host = jax.nn.sigmoid(log_frac_host)
     else:
         frac_host = jnp.asarray(0.0)
-    pl_norm = cont_norm * (1.0 - frac_host)
-    pl_slope_cfg = prior_config['PL_slope']
-    pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
-    if isinstance(pl_slope_cfg, dict) and ('low' in pl_slope_cfg and 'high' in pl_slope_cfg):
-        pl_slope = numpyro.sample(
-            'PL_slope',
-            dist.TruncatedNormal(
-                loc=pl_slope_loc,
-                scale=pl_slope_scale,
-                low=pl_slope_cfg['low'],
-                high=pl_slope_cfg['high'],
-            ),
-        )
+    agn_amp = cont_norm * (1.0 - frac_host)
+    if fit_pl:
+        pl_norm = agn_amp
+        pl_slope_cfg = prior_config['PL_slope']
+        pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
+        if isinstance(pl_slope_cfg, dict) and ('low' in pl_slope_cfg and 'high' in pl_slope_cfg):
+            pl_slope = numpyro.sample(
+                'PL_slope',
+                dist.TruncatedNormal(
+                    loc=pl_slope_loc,
+                    scale=pl_slope_scale,
+                    low=pl_slope_cfg['low'],
+                    high=pl_slope_cfg['high'],
+                ),
+            )
+        else:
+            pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
     else:
-        pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
+        pl_norm = jnp.asarray(0.0)
+        pl_slope = jnp.asarray(0.0)
+        if decompose_host:
+            frac_host = jnp.asarray(1.0)
 
     if fit_fe:
         fe_uv_norm = numpyro.sample('Fe_uv_norm', dist.LogNormal(*_cfg_norm('log_Fe_uv_norm')))
-        fe_op_norm = numpyro.sample('Fe_op_norm', dist.LogNormal(*_cfg_norm('log_Fe_op_norm')))
+        log_fe_op_over_uv = numpyro.sample('log_Fe_op_over_uv', dist.Normal(*_cfg_norm('log_Fe_op_over_uv')))
+        fe_op_norm = fe_uv_norm * jnp.exp(log_fe_op_over_uv)
         fe_uv_fwhm = numpyro.sample('Fe_uv_FWHM', dist.LogNormal(*_cfg_norm('log_Fe_uv_FWHM')))
         fe_op_fwhm = numpyro.sample('Fe_op_FWHM', dist.LogNormal(*_cfg_norm('log_Fe_op_FWHM')))
         fe_uv_shift = numpyro.sample('Fe_uv_shift', dist.Normal(*_cfg_norm('Fe_uv_shift')))
@@ -511,7 +519,10 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         balmer_tau = jnp.asarray(0.5)
         balmer_vel = jnp.asarray(3000.0)
 
-    pl_model_intrinsic = _powerlaw_jax(wave, pl_norm=pl_norm, pl_slope=pl_slope, pivot=3000.0)
+    if fit_pl:
+        pl_model_intrinsic = _powerlaw_jax(wave, pl_norm=pl_norm, pl_slope=pl_slope, pivot=3000.0)
+    else:
+        pl_model_intrinsic = jnp.zeros_like(wave)
     fe_uv_model_intrinsic = _fe_template_component(wave, fe_uv_wave, fe_uv_flux, fe_uv_norm, fe_uv_fwhm, fe_uv_shift)
     fe_op_model_intrinsic = _fe_template_component(wave, fe_op_wave, fe_op_flux, fe_op_norm, fe_op_fwhm, fe_op_shift)
     bc_model_intrinsic = _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel)
@@ -523,7 +534,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     if fit_poly:
         poly_c1 = numpyro.sample('poly_c1', dist.Normal(*_cfg_norm('poly_c1')))
         poly_c2 = numpyro.sample('poly_c2', dist.Normal(*_cfg_norm('poly_c2')))
-        w0 = jnp.median(wave)
+        w0 = 0.5 * (wave[0] + wave[-1])
         x = (wave - w0) / jnp.maximum(w0, 1.0)
         poly_model = jnp.clip(1.0 + poly_c1 * x + poly_c2 * x * x, 0.2, 5.0)
         pl_model = pl_model * poly_model
@@ -606,7 +617,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         line_model = line_model * poly_model
 
     frac_jitter = numpyro.sample('frac_jitter', dist.HalfNormal(_cfg_halfnorm('frac_jitter')))
-    add_jitter = numpyro.sample('add_jitter', dist.HalfNormal(_cfg_halfnorm('add_jitter', ref_scale=jnp.median(err))))
+    add_jitter = numpyro.sample('add_jitter', dist.HalfNormal(_cfg_halfnorm('add_jitter', ref_scale=jnp.mean(err))))
 
     continuum_model = agn_model + gal_model
     model = continuum_model + line_model
