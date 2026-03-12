@@ -148,7 +148,7 @@ def test_dr7_broad_line_regression(tmp_path: Path):
 
         try:
             q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec, plateid=plate, mjd=mjd, fiberid=fiber)
-            q.Fit(
+            q.fit(
                 deredden=True,
                 fit_method="optax+nuts",
                 fit_lines=True,

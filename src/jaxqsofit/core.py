@@ -34,6 +34,26 @@ class QSOFit:
                  wdisp=None):
         """Initialize a spectral fitting object with observed-frame inputs.
 
+        Parameters
+        ----------
+        lam : array-like
+            Observed-frame wavelength array in Angstrom.
+        flux : array-like
+            Observed-frame flux density array.
+        err : array-like or float or None, optional
+            Per-pixel 1-sigma uncertainty. If ``None``, a default of ``1e-6``
+            is used.
+        z : float, optional
+            Source redshift.
+        ra, dec : float, optional
+            Sky coordinates in degrees for Galactic dereddening.
+        plateid, mjd, fiberid : int or None, optional
+            Survey identifiers used for output naming.
+        path : str or None, optional
+            Output directory for saved artifacts.
+        wdisp : array-like or None, optional
+            Optional wavelength dispersion vector (stored only).
+
         Notes
         -----
         Providing per-pixel `err` is strongly recommended for robust inference.
@@ -63,13 +83,14 @@ class QSOFit:
         self.install_path = os.path.dirname(os.path.abspath(__file__))
         self.output_path = path
 
-    def Fit(self, name=None, deredden=True,
+    def fit(self, name=None, deredden=True,
             wave_range=None, wave_mask=None, save_fits_name=None,
             fit_lines=True, save_result=True, plot_fig=True, save_fig=True,
             decompose_host=True,
             fit_fe=True,
             fit_bc=False,
             fit_poly=True,
+            mask_lya_forest=True,
             fit_method='jaxopt+nuts',
             verbose=False,
             fsps_age_grid=(0.1, 0.3, 1.0, 3.0, 10.0),
@@ -83,7 +104,64 @@ class QSOFit:
             optax_steps=600,
             optax_lr=1e-2,
             kwargs_plot=None):
-        """Run end-to-end preprocessing, fitting, and optional plotting/saving."""
+        """Run end-to-end preprocessing, fitting, and optional plotting/saving.
+
+        Parameters
+        ----------
+        name : str or None, optional
+            Optional object name used for figure/output naming.
+        deredden : bool, optional
+            If True, apply Galactic dereddening with dustmaps SFD.
+        wave_range : tuple[float, float] or None, optional
+            Rest-frame wavelength range to keep.
+        wave_mask : array-like or None, optional
+            Rest-frame wavelength intervals to mask.
+        save_fits_name : str or None, optional
+            Basename for saved result table.
+        fit_lines : bool, optional
+            Enable/disable emission-line model.
+        save_result : bool, optional
+            If True, write summary results to CSV.
+        plot_fig : bool, optional
+            If True, render decomposition figure.
+        save_fig : bool, optional
+            If True, save rendered figures.
+        decompose_host : bool, optional
+            Enable/disable host SPS decomposition.
+        fit_fe : bool, optional
+            Enable/disable FeII components.
+        fit_bc : bool, optional
+            Enable/disable Balmer continuum.
+        fit_poly : bool, optional
+            Enable/disable multiplicative polynomial tilt.
+        mask_lya_forest : bool, optional
+            If True, mask pixels with rest-frame wavelength below Ly-alpha
+            (1215.67 Angstrom) before fitting.
+        fit_method : {'nuts', 'optax', 'optax+nuts'}, optional
+            Fitting backend.
+        verbose : bool, optional
+            Verbose optimizer output where applicable.
+        fsps_age_grid : sequence of float, optional
+            SSP age grid in Gyr.
+        fsps_logzsol_grid : sequence of float, optional
+            SSP metallicity grid in log(Z/Zsun).
+        prior_config : dict or None, optional
+            Prior/config dictionary. If None, defaults are auto-built.
+        dsps_ssp_fn : str, optional
+            Path to DSPS SSP HDF5 template file.
+        nuts_warmup, nuts_samples : int, optional
+            NUTS warmup and posterior sample counts.
+        nuts_chains : int, optional
+            Number of MCMC chains.
+        nuts_target_accept : float, optional
+            Target accept probability for NUTS.
+        optax_steps : int, optional
+            Number of SVI/Optax warm-start steps.
+        optax_lr : float, optional
+            Learning rate for Optax Adam.
+        kwargs_plot : dict or None, optional
+            Extra keyword arguments passed to :meth:`plot_fig`.
+        """
 
         if kwargs_plot is None:
             kwargs_plot = {}
@@ -140,15 +218,17 @@ class QSOFit:
             prior_config = build_default_prior_config(self.flux)
 
         if wave_range is not None:
-            self._WaveTrim(self.lam, self.flux, self.err, self.z)
+            self._wave_trim(self.lam, self.flux, self.err, self.z)
         if wave_mask is not None:
-            self._WaveMsk(self.lam, self.flux, self.err, self.z)
+            self._wave_msk(self.lam, self.flux, self.err, self.z)
+        if mask_lya_forest:
+            self._mask_lya_forest(self.lam, self.flux, self.err, self.z)
         if deredden:
-            self._DeRedden(self.lam, self.flux, self.err, self.ra, self.dec)
+            self._de_redden(self.lam, self.flux, self.err, self.ra, self.dec)
 
-        self._RestFrame(self.lam, self.flux, self.err, self.z)
-        self._CalculateSN(self.wave, self.flux)
-        self._OrignialSpec(self.wave, self.flux, self.err)
+        self._rest_frame(self.lam, self.flux, self.err, self.z)
+        self._calculate_sn(self.wave, self.flux)
+        self._orignial_spec(self.wave, self.flux, self.err)
 
         if fit_method == 'nuts':
             self.run_fsps_numpyro_fit(
@@ -220,7 +300,29 @@ class QSOFit:
                              fit_bc=True,
                              fit_poly=False,
                              init_values=None):
-        """Fit the full model using NUTS MCMC and store posterior summaries."""
+        """Fit the full model using NUTS MCMC and store posterior summaries.
+
+        Parameters
+        ----------
+        num_warmup, num_samples : int, optional
+            MCMC warmup and posterior sample counts.
+        num_chains : int, optional
+            Number of MCMC chains.
+        target_accept_prob : float, optional
+            Target acceptance probability for NUTS.
+        age_grid_gyr : sequence of float, optional
+            SSP age grid in Gyr.
+        logzsol_grid : sequence of float, optional
+            SSP metallicity grid in log(Z/Zsun).
+        prior_config : dict or None, optional
+            Prior/config dictionary for model blocks.
+        dsps_ssp_fn : str, optional
+            DSPS SSP template HDF5 path.
+        use_lines, decompose_host, fit_fe, fit_bc, fit_poly : bool, optional
+            Component toggles for model blocks.
+        init_values : dict or None, optional
+            Optional initial values for ``init_to_value``.
+        """
         wave = np.asarray(self.wave, dtype=float)
         flux = np.asarray(self.flux, dtype=float)
         err = np.asarray(self.err, dtype=float)
@@ -343,7 +445,25 @@ class QSOFit:
                            fit_fe=True,
                            fit_bc=True,
                            fit_poly=False):
-        """Fit a MAP approximation using staged SVI with an Optax optimizer."""
+        """Fit a MAP approximation using staged SVI with an Optax optimizer.
+
+        Parameters
+        ----------
+        num_steps : int, optional
+            Total SVI steps across all stages.
+        learning_rate : float, optional
+            Adam learning rate.
+        age_grid_gyr : sequence of float, optional
+            SSP age grid in Gyr.
+        logzsol_grid : sequence of float, optional
+            SSP metallicity grid in log(Z/Zsun).
+        prior_config : dict or None, optional
+            Prior/config dictionary for model blocks.
+        dsps_ssp_fn : str, optional
+            DSPS SSP template HDF5 path.
+        use_lines, decompose_host, fit_fe, fit_bc, fit_poly : bool, optional
+            Component toggles for model blocks.
+        """
         wave = np.asarray(self.wave, dtype=float)
         flux = np.asarray(self.flux, dtype=float)
         err = np.asarray(self.err, dtype=float)
@@ -515,7 +635,31 @@ class QSOFit:
                                 fit_fe=True,
                                 fit_bc=True,
                                 fit_poly=False):
-        """Warm-start with Optax MAP, then run NUTS as final inference."""
+        """Warm-start with Optax MAP, then run NUTS as final inference.
+
+        Parameters
+        ----------
+        optax_steps : int, optional
+            Number of SVI/Optax warm-start steps.
+        optax_learning_rate : float, optional
+            Learning rate for SVI warm-start.
+        num_warmup, num_samples : int, optional
+            NUTS warmup and posterior sample counts.
+        num_chains : int, optional
+            Number of MCMC chains.
+        target_accept_prob : float, optional
+            Target acceptance probability for NUTS.
+        age_grid_gyr : sequence of float, optional
+            SSP age grid in Gyr.
+        logzsol_grid : sequence of float, optional
+            SSP metallicity grid in log(Z/Zsun).
+        prior_config : dict or None, optional
+            Prior/config dictionary for model blocks.
+        dsps_ssp_fn : str, optional
+            DSPS SSP template HDF5 path.
+        use_lines, decompose_host, fit_fe, fit_bc, fit_poly : bool, optional
+            Component toggles for model blocks.
+        """
         self.run_fsps_optax_fit(
             num_steps=optax_steps,
             learning_rate=optax_learning_rate,
@@ -548,7 +692,23 @@ class QSOFit:
         )
 
     def _consume_posterior_outputs(self, samples, pred_out, fsps_grid, tied_line_meta, use_lines, decompose_host):
-        """Populate model components, uncertainty bands, and summary tables."""
+        """Populate model components, uncertainty bands, and summary tables.
+
+        Parameters
+        ----------
+        samples : dict
+            Posterior samples keyed by parameter name.
+        pred_out : dict
+            Posterior predictive outputs from ``Predictive``.
+        fsps_grid : FSPSTemplateGrid
+            Host SSP template grid metadata.
+        tied_line_meta : dict
+            Emission-line grouping metadata.
+        use_lines : bool
+            Whether line model was enabled.
+        decompose_host : bool
+            Whether host model was enabled.
+        """
         flux = np.asarray(self.flux, dtype=float)
         self.numpyro_samples = samples
         self.fsps_grid = fsps_grid
@@ -691,24 +851,66 @@ class QSOFit:
             self.line_component_mu_median = np.array([])
             self.line_component_sig_median = np.array([])
 
-    def _WaveTrim(self, lam, flux, err, z):
-        """Apply rest-frame wavelength range trimming."""
+    def _wave_trim(self, lam, flux, err, z):
+        """Apply rest-frame wavelength range trimming.
+
+        Parameters
+        ----------
+        lam, flux, err : ndarray
+            Observed-frame wavelength, flux, and uncertainty arrays.
+        z : float
+            Redshift used for rest-frame conversion.
+        """
         ind_trim = np.where((lam / (1 + z) > self.wave_range[0]) & (lam / (1 + z) < self.wave_range[1]), True, False)
         self.lam, self.flux, self.err = lam[ind_trim], flux[ind_trim], err[ind_trim]
         if len(self.lam) < 100:
             raise RuntimeError('No enough pixels in the input wave_range!')
         return self.lam, self.flux, self.err
 
-    def _WaveMsk(self, lam, flux, err, z):
-        """Mask user-provided rest-frame wavelength intervals."""
+    def _wave_msk(self, lam, flux, err, z):
+        """Mask user-provided rest-frame wavelength intervals.
+
+        Parameters
+        ----------
+        lam, flux, err : ndarray
+            Observed-frame wavelength, flux, and uncertainty arrays.
+        z : float
+            Redshift used for rest-frame conversion.
+        """
         for msk in range(len(self.wave_mask)):
             ind_not_mask = ~np.where((lam / (1 + z) > self.wave_mask[msk, 0]) & (lam / (1 + z) < self.wave_mask[msk, 1]), True, False)
             self.lam, self.flux, self.err = lam[ind_not_mask], flux[ind_not_mask], err[ind_not_mask]
             lam, flux, err = self.lam, self.flux, self.err
         return self.lam, self.flux, self.err
 
-    def _DeRedden(self, lam, flux, err, ra, dec):
-        """Correct observed flux/error for Galactic extinction using dustmaps."""
+    def _mask_lya_forest(self, lam, flux, err, z, lya_rest=1215.67):
+        """Mask observed pixels blueward of rest-frame Ly-alpha.
+
+        Parameters
+        ----------
+        lam, flux, err : ndarray
+            Observed-frame wavelength, flux, and uncertainty arrays.
+        z : float
+            Redshift used for rest-frame conversion.
+        lya_rest : float, optional
+            Rest-frame Ly-alpha cutoff in Angstrom.
+        """
+        keep = (lam / (1 + z)) >= float(lya_rest)
+        self.lam, self.flux, self.err = lam[keep], flux[keep], err[keep]
+        if len(self.lam) < 10:
+            raise RuntimeError('Not enough pixels after Ly-alpha forest masking.')
+        return self.lam, self.flux, self.err
+
+    def _de_redden(self, lam, flux, err, ra, dec):
+        """Correct observed flux/error for Galactic extinction using dustmaps.
+
+        Parameters
+        ----------
+        lam, flux, err : ndarray
+            Observed-frame wavelength, flux, and uncertainty arrays.
+        ra, dec : float
+            Sky coordinates in degrees.
+        """
         sfd_query = _get_sfd_query()
         coord = SkyCoord(float(ra) * u.deg, float(dec) * u.deg, frame='icrs')
         ebv = float(np.asarray(sfd_query(coord)))
@@ -721,21 +923,43 @@ class QSOFit:
         self.err = err_unred
         return self.flux
 
-    def _RestFrame(self, lam, flux, err, z):
-        """Convert observed-frame spectra to rest-frame convention."""
+    def _rest_frame(self, lam, flux, err, z):
+        """Convert observed-frame spectra to rest-frame convention.
+
+        Parameters
+        ----------
+        lam, flux, err : ndarray
+            Observed-frame wavelength, flux, and uncertainty arrays.
+        z : float
+            Source redshift.
+        """
         self.wave = lam / (1 + z)
         self.flux = flux * (1 + z)
         self.err = err * (1 + z)
         return self.wave, self.flux, self.err
 
-    def _OrignialSpec(self, wave, flux, err):
-        """Cache the pre-modeling spectrum for plotting/debugging."""
+    def _orignial_spec(self, wave, flux, err):
+        """Cache the pre-modeling spectrum for plotting/debugging.
+
+        Parameters
+        ----------
+        wave, flux, err : ndarray
+            Rest-frame wavelength, flux, and uncertainty arrays.
+        """
         self.wave_prereduced = wave
         self.flux_prereduced = flux
         self.err_prereduced = err
 
-    def _CalculateSN(self, wave, flux, alter=True):
-        """Estimate continuum S/N from standard windows or robust fallback."""
+    def _calculate_sn(self, wave, flux, alter=True):
+        """Estimate continuum S/N from standard windows or robust fallback.
+
+        Parameters
+        ----------
+        wave, flux : ndarray
+            Rest-frame wavelength and flux arrays.
+        alter : bool, optional
+            If True and standard windows are unavailable, use robust fallback.
+        """
         ind5100 = np.where((wave > 5080) & (wave < 5130), True, False)
         ind3000 = np.where((wave > 3000) & (wave < 3050), True, False)
         ind1350 = np.where((wave > 1325) & (wave < 1375), True, False)
@@ -759,15 +983,35 @@ class QSOFit:
         return self.SN_ratio_conti
 
     def _host_fraction_at_wave(self, w0):
-        """Return host/continuum flux fraction at wavelength `w0`."""
+        """Return host/continuum flux fraction at wavelength ``w0``.
+
+        Parameters
+        ----------
+        w0 : float
+            Rest-frame wavelength in Angstrom.
+        """
         return self._component_fraction_at_wave(self.host, w0)
 
     def _bc_fraction_at_wave(self, w0):
-        """Return Balmer-continuum/continuum flux fraction at wavelength `w0`."""
+        """Return Balmer-continuum/continuum flux fraction at wavelength ``w0``.
+
+        Parameters
+        ----------
+        w0 : float
+            Rest-frame wavelength in Angstrom.
+        """
         return self._component_fraction_at_wave(self.f_bc_model, w0)
 
     def _component_fraction_at_wave(self, component, w0):
-        """Return component fraction relative to fitted continuum at `w0`."""
+        """Return component fraction relative to fitted continuum at ``w0``.
+
+        Parameters
+        ----------
+        component : ndarray
+            Component flux array evaluated on ``self.wave``.
+        w0 : float
+            Rest-frame wavelength in Angstrom.
+        """
         if len(self.wave) == 0:
             return -1.
         comp = np.interp(w0, self.wave, component, left=np.nan, right=np.nan)
@@ -783,7 +1027,15 @@ class QSOFit:
         mu: np.ndarray,
         sig: np.ndarray,
     ) -> np.ndarray:
-        """Build a line profile from explicit Gaussian parameter arrays."""
+        """Build a line profile from explicit Gaussian parameter arrays.
+
+        Parameters
+        ----------
+        line_key : str
+            Line-name prefix (for example ``'Hb_br'``).
+        amp, mu, sig : ndarray
+            Gaussian amplitudes, centers (ln lambda), and widths.
+        """
         if not hasattr(self, 'wave') or len(self.wave) == 0:
             return np.array([], dtype=float)
         if not hasattr(self, 'tied_line_meta'):
@@ -808,7 +1060,13 @@ class QSOFit:
         return prof
 
     def line_profile_from_components(self, line_key: str) -> np.ndarray:
-        """Build a line-only profile from posterior-median Gaussian components."""
+        """Build a line-only profile from posterior-median Gaussian components.
+
+        Parameters
+        ----------
+        line_key : str
+            Line-name prefix (for example ``'Hb_br'``).
+        """
         if not hasattr(self, 'line_component_amp_median'):
             return np.zeros_like(self.wave, dtype=float)
         return self._line_profile_from_params(
@@ -819,7 +1077,15 @@ class QSOFit:
         )
 
     def line_profile_from_draw(self, draw_index: int, line_key: str) -> np.ndarray:
-        """Build a line-only profile for one posterior draw index."""
+        """Build a line-only profile for one posterior draw index.
+
+        Parameters
+        ----------
+        draw_index : int
+            Posterior draw index.
+        line_key : str
+            Line-name prefix (for example ``'Hb_br'``).
+        """
         if not hasattr(self, 'pred_out') or self.pred_out is None:
             return np.zeros_like(self.wave, dtype=float)
         if 'line_amp_per_component' not in self.pred_out:
@@ -843,7 +1109,15 @@ class QSOFit:
         )
 
     def line_props(self, profile: np.ndarray, wave: np.ndarray | None = None) -> tuple[float, float]:
-        """Return `(fwhm_kms, integrated_area)` from a line profile."""
+        """Return ``(fwhm_kms, integrated_area)`` from a line profile.
+
+        Parameters
+        ----------
+        profile : ndarray
+            Line profile values.
+        wave : ndarray or None, optional
+            Wavelength array. If ``None``, ``self.wave`` is used.
+        """
         p = np.asarray(profile, dtype=float)
         w = np.asarray(self.wave if wave is None else wave, dtype=float)
         if p.size == 0 or w.size == 0 or p.size != w.size:
@@ -864,11 +1138,31 @@ class QSOFit:
         return float(fwhm_kms), area
 
     def line_props_from_profile(self, wave: np.ndarray, profile: np.ndarray) -> tuple[float, float]:
-        """Compatibility wrapper for `line_props(profile, wave=wave)`."""
+        """Compatibility wrapper for :meth:`line_props`.
+
+        Parameters
+        ----------
+        wave : ndarray
+            Wavelength array.
+        profile : ndarray
+            Line profile values.
+        """
         return self.line_props(profile=profile, wave=wave)
 
     def save_result(self, conti_result, conti_result_type, conti_result_name, line_result, line_result_type, line_result_name, save_fits_name):
-        """Write continuum+line summary table to a pandas CSV file."""
+        """Write continuum+line summary table to a pandas CSV file.
+
+        Parameters
+        ----------
+        conti_result, line_result : ndarray
+            Continuum and line result values.
+        conti_result_type, line_result_type : ndarray
+            Legacy dtype tags (stored but not enforced).
+        conti_result_name, line_result_name : ndarray
+            Column names for continuum and line outputs.
+        save_fits_name : str
+            Output basename for CSV.
+        """
         self.all_result = np.concatenate([conti_result, line_result])
         self.all_result_type = np.concatenate([conti_result_type, line_result_type])
         self.all_result_name = np.concatenate([conti_result_name, line_result_name])
@@ -881,7 +1175,15 @@ class QSOFit:
         return
 
     def _posterior_series(self, param_names=None, max_vector_elems=2):
-        """Flatten posterior samples into labeled 1D series for diagnostics."""
+        """Flatten posterior samples into labeled 1D series for diagnostics.
+
+        Parameters
+        ----------
+        param_names : list[str] | str | None, optional
+            Parameter selector. Use ``'all'`` for all posterior keys.
+        max_vector_elems : int or None, optional
+            Maximum number of vector elements to expand per key.
+        """
         if not hasattr(self, 'numpyro_samples') or self.numpyro_samples is None:
             return []
 
@@ -916,7 +1218,15 @@ class QSOFit:
 
     @staticmethod
     def _style_axis(ax, spine_lw=1.5):
-        """Apply consistent axis styling: ticks on all sides, no grid, thicker spines."""
+        """Apply consistent axis styling.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axis to style.
+        spine_lw : float, optional
+            Line width for all spines.
+        """
         ax.grid(False)
         ax.tick_params(
             which='both',
@@ -930,7 +1240,19 @@ class QSOFit:
             spine.set_linewidth(spine_lw)
 
     def plot_trace(self, param_names=None, max_vector_elems=2, save_fig_path='.', save_fig_name=None):
-        """Plot posterior trace series for selected parameters."""
+        """Plot posterior trace series for selected parameters.
+
+        Parameters
+        ----------
+        param_names : list[str] | str | None, optional
+            Parameter selector. Use ``'all'`` to include all posterior keys.
+        max_vector_elems : int or None, optional
+            Maximum number of vector elements to expand per key.
+        save_fig_path : str, optional
+            Output directory when saving figures.
+        save_fig_name : str or None, optional
+            Output filename override.
+        """
         series = self._posterior_series(param_names=param_names, max_vector_elems=max_vector_elems)
         if len(series) == 0:
             return None
@@ -956,7 +1278,23 @@ class QSOFit:
         return fig
 
     def plot_corner(self, param_names=None, max_vector_elems=2, bins=30, max_points=2000, save_fig_path='.', save_fig_name=None):
-        """Plot a simple corner-style posterior projection matrix."""
+        """Plot a simple corner-style posterior projection matrix.
+
+        Parameters
+        ----------
+        param_names : list[str] | str | None, optional
+            Parameter selector. Use ``'all'`` to include all posterior keys.
+        max_vector_elems : int or None, optional
+            Maximum number of vector elements to expand per key.
+        bins : int, optional
+            Histogram bin count.
+        max_points : int, optional
+            Maximum posterior draws to plot (subsampled if needed).
+        save_fig_path : str, optional
+            Output directory when saving figures.
+        save_fig_name : str or None, optional
+            Output filename override.
+        """
         series = self._posterior_series(param_names=param_names, max_vector_elems=max_vector_elems)
         if len(series) == 0:
             return None
@@ -1009,9 +1347,21 @@ class QSOFit:
 
         Parameters
         ----------
+        do_trace : bool, optional
+            If True, render trace plot.
+        do_corner : bool, optional
+            If True, render corner plot.
         param_names : list[str] | str | None
             Parameter selector shared by both trace and corner plots.
             Use ``'all'`` to include all posterior parameters.
+        max_vector_elems : int or None, optional
+            Maximum number of vector elements to expand per key.
+        corner_bins : int, optional
+            Histogram bin count for corner plot.
+        corner_max_points : int, optional
+            Maximum posterior draws to use in corner plot.
+        save_fig_path : str, optional
+            Output directory when saving figures.
         """
         if do_trace:
             self.plot_trace(
@@ -1030,7 +1380,27 @@ class QSOFit:
 
     def plot_fig(self, save_fig_path='.', broad_fwhm=1200, plot_legend=True, ylims=None, plot_residual=True, show_title=True,
                  plot_1sigma=True, sigma_alpha=0.12):
-        """Plot data, model components, line decomposition, and residuals."""
+        """Plot data, model components, line decomposition, and residuals.
+
+        Parameters
+        ----------
+        save_fig_path : str, optional
+            Output directory when saving figures.
+        broad_fwhm : float, optional
+            Reserved broad-line threshold (kept for compatibility).
+        plot_legend : bool, optional
+            If True, draw a legend.
+        ylims : tuple[float, float] or None, optional
+            Optional y-axis limits for the spectrum panel.
+        plot_residual : bool, optional
+            If True, draw residual panel below the spectrum.
+        show_title : bool, optional
+            Reserved title toggle kept for compatibility.
+        plot_1sigma : bool, optional
+            If True, draw 16-84% posterior bands for available components.
+        sigma_alpha : float, optional
+            Alpha transparency of 1-sigma bands.
+        """
         matplotlib.rc('xtick', labelsize=20)
         matplotlib.rc('ytick', labelsize=20)
         if plot_residual:

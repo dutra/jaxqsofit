@@ -16,7 +16,7 @@ Minimal fitting example
    z = 0.1
 
    q = QSOFit(lam=lam, flux=flux, err=err, z=z)
-   q.Fit(
+   q.fit(
        fit_method='nuts',
        fit_lines=True,
        decompose_host=True,
@@ -34,7 +34,7 @@ For a fast MAP-style fit, use:
 
 .. code-block:: python
 
-   q.Fit(
+   q.fit(
        fit_method='optax',
        optax_steps=1500,
        optax_lr=1e-2,
@@ -49,7 +49,7 @@ Warm-start with Optax, then run NUTS:
 
 .. code-block:: python
 
-   q.Fit(
+   q.fit(
        fit_method='optax+nuts',
        optax_steps=800,
        nuts_warmup=200,

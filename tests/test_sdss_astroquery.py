@@ -100,7 +100,7 @@ def test_sdss_fit_wrms_below_threshold():
     z = float(xid[0]['z']) if 'z' in xid.colnames else 0.1
 
     q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec)
-    q.Fit(
+    q.fit(
         deredden=False,
         fit_method='optax+nuts',
         fit_lines=True,

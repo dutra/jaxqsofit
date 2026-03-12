@@ -30,7 +30,7 @@ def test_fit_dispatch_nuts(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_numpyro_fit', _stub_nuts)
 
-    q.Fit(
+    q.fit(
         deredden=False,
         fit_method='nuts',
         plot_fig=False,
@@ -52,7 +52,7 @@ def test_fit_dispatch_optax(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
-    q.Fit(
+    q.fit(
         deredden=False,
         fit_method='optax',
         plot_fig=False,
@@ -74,7 +74,7 @@ def test_fit_dispatch_optax_nuts(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_optax_nuts_fit', _stub_optax_nuts)
 
-    q.Fit(
+    q.fit(
         deredden=False,
         fit_method='optax+nuts',
         plot_fig=False,
@@ -90,7 +90,7 @@ def test_fit_method_unknown_raises():
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
 
     with pytest.raises(ValueError, match='Unknown fit_method'):
-        q.Fit(
+        q.fit(
             deredden=False,
             fit_method='not-a-method',
             plot_fig=False,

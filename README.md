@@ -152,7 +152,7 @@ q = jaxqsofit.QSOFit(
     path="."
 )
 
-q.Fit(
+q.fit(
     deredden=True,
     fit_lines=True,
     decompose_host=True,
@@ -173,7 +173,7 @@ q.Fit(
 If you want speed over full posterior sampling, use:
 
 ```python
-q.Fit(
+q.fit(
     fit_method="optax",
     optax_steps=1500,
     optax_lr=1e-2,
@@ -191,7 +191,7 @@ prior_config = {
     "student_t_df": 2.5,
     "PL_slope": {"loc": -1.5, "scale": 0.3, "low": -3.5, "high": 0.3},
 }
-q.Fit(prior_config=prior_config, fit_lines=False, fit_fe=False, fit_bc=True)
+q.fit(prior_config=prior_config, fit_lines=False, fit_fe=False, fit_bc=True)
 ```
 
 ## Important API notes
