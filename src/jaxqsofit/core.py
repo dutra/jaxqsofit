@@ -98,6 +98,7 @@ class QSOFit:
     def fit(self, name=None, deredden=True,
             wave_range=None, wave_mask=None, save_fits_name=None,
             fit_lines=True, save_result=True, plot_fig=True, save_fig=True,
+            show_plot=False,
             decompose_host=True,
             fit_pl=True,
             fit_fe=True,
@@ -105,7 +106,7 @@ class QSOFit:
             fit_poly=True,
             mask_lya_forest=True,
             fit_method='jaxopt+nuts',
-            verbose=False,
+            verbose=True,
             fsps_age_grid=(0.1, 0.3, 1.0, 3.0, 10.0),
             fsps_logzsol_grid=(-1.0, -0.5, 0.0, 0.2),
             prior_config=None,
@@ -139,6 +140,9 @@ class QSOFit:
             If True, render decomposition figure.
         save_fig : bool, optional
             If True, save rendered figures.
+        show_plot : bool, optional
+            If True, call ``plt.show()`` for the decomposition figure.
+            Default is ``False`` to avoid interactive pop-ups in notebook/pipeline runs.
         decompose_host : bool, optional
             Enable/disable host SPS decomposition.
         fit_pl : bool, optional
@@ -180,6 +184,8 @@ class QSOFit:
 
         if kwargs_plot is None:
             kwargs_plot = {}
+        if 'show_plot' not in kwargs_plot:
+            kwargs_plot['show_plot'] = show_plot
 
         self.wave_range = wave_range
         self.wave_mask = wave_mask
@@ -1412,7 +1418,7 @@ class QSOFit:
             )
 
     def plot_fig(self, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylims=None, plot_residual=True, show_title=True,
-                 plot_1sigma=True, sigma_alpha=0.12):
+                 plot_1sigma=True, sigma_alpha=0.12, show_plot=True):
         """Plot data, model components, line decomposition, and residuals.
 
         Parameters
@@ -1434,6 +1440,8 @@ class QSOFit:
             If True, draw 16-84% posterior bands for available components.
         sigma_alpha : float, optional
             Alpha transparency of 1-sigma bands.
+        show_plot : bool, optional
+            If True, call ``plt.show()``. If False, figure is created/saved without display.
         """
         matplotlib.rc('xtick', labelsize=20)
         matplotlib.rc('ytick', labelsize=20)
@@ -1593,7 +1601,8 @@ class QSOFit:
         self._style_axis(ax)
         if plot_legend:
             ax.legend(frameon=True, framealpha=0.9, edgecolor='0.3', fontsize=9, ncol=2)
-        plt.show()
+        if show_plot:
+            plt.show()
         if self.save_fig:
             save_dir = self.output_path if save_fig_path is None else save_fig_path
             if save_dir is None:
