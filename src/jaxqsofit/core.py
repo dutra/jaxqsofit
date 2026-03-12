@@ -30,7 +30,7 @@ from .model import (
 )
 
 class QSOFit:
-    def __init__(self, lam, flux, err=None, z=0.0, ra=-999, dec=-999, plateid=None, mjd=None, fiberid=None, path=None,
+    def __init__(self, lam, flux, err=None, z=0.0, ra=-999, dec=-999, filename=None, output_path=None,
                  wdisp=None):
         """Initialize a spectral fitting object with observed-frame inputs.
 
@@ -47,9 +47,10 @@ class QSOFit:
             Source redshift.
         ra, dec : float, optional
             Sky coordinates in degrees for Galactic dereddening.
-        plateid, mjd, fiberid : int or None, optional
-            Survey identifiers used for output naming.
-        path : str or None, optional
+        filename : str or None, optional
+            Basename used for saving result tables/figures. If ``None``,
+            a filename is auto-generated from ``ra`` and ``dec``.
+        output_path : str or None, optional
             Output directory for saved artifacts.
         wdisp : array-like or None, optional
             Optional wavelength dispersion vector (stored only).
@@ -76,12 +77,23 @@ class QSOFit:
         self.wdisp = wdisp
         self.ra = ra
         self.dec = dec
-        self.plateid = plateid
-        self.mjd = mjd
-        self.fiberid = fiberid
-        self.path = path
         self.install_path = os.path.dirname(os.path.abspath(__file__))
-        self.output_path = path
+        self.output_path = output_path
+        self.filename = self._resolve_filename(filename=filename, ra=ra, dec=dec)
+
+    @staticmethod
+    def _resolve_filename(filename=None, ra=-999, dec=-999):
+        """Resolve a filesystem-safe basename for outputs."""
+        if filename is not None and str(filename).strip() != "":
+            return str(filename).strip()
+        try:
+            ra_f = float(ra)
+            dec_f = float(dec)
+        except Exception:
+            return "result"
+        if np.isfinite(ra_f) and np.isfinite(dec_f) and (ra_f != -999) and (dec_f != -999):
+            return f"ra{ra_f:.5f}_dec{dec_f:.5f}"
+        return "result"
 
     def fit(self, name=None, deredden=True,
             wave_range=None, wave_mask=None, save_fits_name=None,
@@ -110,7 +122,7 @@ class QSOFit:
         Parameters
         ----------
         name : str or None, optional
-            Optional object name used for figure/output naming.
+            Optional override basename used for figure/output naming.
         deredden : bool, optional
             If True, apply Galactic dereddening with dustmaps SFD.
         wave_range : tuple[float, float] or None, optional
@@ -174,6 +186,8 @@ class QSOFit:
         self.linefit = fit_lines
         self.save_fig = save_fig
         self.verbose = verbose
+        if name is not None and str(name).strip() != "":
+            self.filename = str(name).strip()
         prior_config_input = prior_config
         prior_config = {} if prior_config is None else prior_config
         out_params = prior_config.get('out_params', {})
@@ -194,23 +208,8 @@ class QSOFit:
         self.fe_op_wave = fe_op_wave[m]
         self.fe_op_flux = fe_op_flux[m]
 
-        if name is None:
-            if np.array([self.plateid, self.mjd, self.fiberid]).any() is not None:
-                self.sdss_name = str(self.plateid).zfill(4) + '-' + str(self.mjd) + '-' + str(self.fiberid).zfill(4)
-            else:
-                self.sdss_name = ''
-        else:
-            self.sdss_name = name
-
-        if self.plateid is None:
-            self.plateid = 0
-        if self.mjd is None:
-            self.mjd = 0
-        if self.fiberid is None:
-            self.fiberid = 0
-
         if save_fits_name is None:
-            save_fits_name = self.sdss_name if self.sdss_name != '' else 'result'
+            save_fits_name = self.filename
 
         ind_gooderror = np.where((self.err_in > 0) & np.isfinite(self.err_in) & (self.flux_in != 0) & np.isfinite(self.flux_in), True, False)
         self.err = self.err_in[ind_gooderror]
@@ -816,7 +815,7 @@ class QSOFit:
             pl_slope_med = np.nan
             pl_slope_err = np.nan
         self.conti_result = np.array([
-            self.ra, self.dec, str(self.plateid), str(self.mjd), str(self.fiberid), self.z,
+            self.ra, self.dec, str(self.filename), self.z,
             self.SN_ratio_conti,
             float(np.nanmedian(pl_norm_samp)), float(np.nanstd(pl_norm_samp)),
             pl_slope_med, pl_slope_err,
@@ -825,13 +824,13 @@ class QSOFit:
             age_weighted, metal_weighted,
         ], dtype=object)
         self.conti_result_type = np.array([
-            'float', 'float', 'int', 'int', 'int', 'float', 'float',
+            'float', 'float', 'str', 'float', 'float',
             'float', 'float', 'float', 'float',
             'float', 'float', 'float', 'float',
             'float', 'float', 'float', 'float', 'float', 'float'
         ], dtype=object)
         self.conti_result_name = np.array([
-            'ra', 'dec', 'plateid', 'MJD', 'fiberid', 'redshift', 'SN_ratio_conti',
+            'ra', 'dec', 'filename', 'redshift', 'SN_ratio_conti',
             'PL_norm', 'PL_norm_err', 'PL_slope', 'PL_slope_err',
             'sigma', 'sigma_err', 'v_off', 'v_off_err',
             'frac_host_4200', 'frac_host_5100', 'frac_host_2500', 'frac_bc_2500',
@@ -1262,7 +1261,7 @@ class QSOFit:
         for spine in ax.spines.values():
             spine.set_linewidth(spine_lw)
 
-    def plot_trace(self, param_names=None, max_vector_elems=2, save_fig_path='.', save_fig_name=None):
+    def plot_trace(self, param_names=None, max_vector_elems=2, save_fig_path=None, save_fig_name=None):
         """Plot posterior trace series for selected parameters.
 
         Parameters
@@ -1271,8 +1270,9 @@ class QSOFit:
             Parameter selector. Use ``'all'`` to include all posterior keys.
         max_vector_elems : int or None, optional
             Maximum number of vector elements to expand per key.
-        save_fig_path : str, optional
-            Output directory when saving figures.
+        save_fig_path : str or None, optional
+            Output directory when saving figures. If ``None``, uses ``self.output_path``
+            (or ``'.'`` when unset).
         save_fig_name : str or None, optional
             Output filename override.
         """
@@ -1292,15 +1292,19 @@ class QSOFit:
         fig.tight_layout()
         plt.show()
         if self.save_fig:
-            out_name = f'{self.sdss_name}_trace.pdf' if save_fig_name is None else save_fig_name
-            out_file = os.path.join(save_fig_path, out_name)
+            out_name = f'{self.filename}_trace.pdf' if save_fig_name is None else save_fig_name
+            save_dir = self.output_path if save_fig_path is None else save_fig_path
+            if save_dir is None:
+                save_dir = '.'
+            os.makedirs(save_dir, exist_ok=True)
+            out_file = os.path.join(save_dir, out_name)
             fig.savefig(out_file)
             print(f"Saved trace plot: {out_file}")
             plt.close(fig)
         self.trace_fig = fig
         return fig
 
-    def plot_corner(self, param_names=None, max_vector_elems=2, bins=30, max_points=2000, save_fig_path='.', save_fig_name=None):
+    def plot_corner(self, param_names=None, max_vector_elems=2, bins=30, max_points=2000, save_fig_path=None, save_fig_name=None):
         """Plot a simple corner-style posterior projection matrix.
 
         Parameters
@@ -1313,8 +1317,9 @@ class QSOFit:
             Histogram bin count.
         max_points : int, optional
             Maximum posterior draws to plot (subsampled if needed).
-        save_fig_path : str, optional
-            Output directory when saving figures.
+        save_fig_path : str or None, optional
+            Output directory when saving figures. If ``None``, uses ``self.output_path``
+            (or ``'.'`` when unset).
         save_fig_name : str or None, optional
             Output filename override.
         """
@@ -1353,8 +1358,12 @@ class QSOFit:
         fig.tight_layout(pad=0.35)
         plt.show()
         if self.save_fig:
-            out_name = f'{self.sdss_name}_corner.pdf' if save_fig_name is None else save_fig_name
-            out_file = os.path.join(save_fig_path, out_name)
+            out_name = f'{self.filename}_corner.pdf' if save_fig_name is None else save_fig_name
+            save_dir = self.output_path if save_fig_path is None else save_fig_path
+            if save_dir is None:
+                save_dir = '.'
+            os.makedirs(save_dir, exist_ok=True)
+            out_file = os.path.join(save_dir, out_name)
             fig.savefig(out_file)
             print(f"Saved corner plot: {out_file}")
             plt.close(fig)
@@ -1365,7 +1374,7 @@ class QSOFit:
                               param_names=None,
                               max_vector_elems=2,
                               corner_bins=30, corner_max_points=2000,
-                              save_fig_path='.'):
+                              save_fig_path=None):
         """Plot trace and/or corner diagnostics in a single convenience call.
 
         Parameters
@@ -1383,8 +1392,9 @@ class QSOFit:
             Histogram bin count for corner plot.
         corner_max_points : int, optional
             Maximum posterior draws to use in corner plot.
-        save_fig_path : str, optional
-            Output directory when saving figures.
+        save_fig_path : str or None, optional
+            Output directory when saving figures. If ``None``, uses ``self.output_path``
+            (or ``'.'`` when unset).
         """
         if do_trace:
             self.plot_trace(
@@ -1401,14 +1411,15 @@ class QSOFit:
                 save_fig_path=save_fig_path,
             )
 
-    def plot_fig(self, save_fig_path='.', broad_fwhm=1200, plot_legend=True, ylims=None, plot_residual=True, show_title=True,
+    def plot_fig(self, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylims=None, plot_residual=True, show_title=True,
                  plot_1sigma=True, sigma_alpha=0.12):
         """Plot data, model components, line decomposition, and residuals.
 
         Parameters
         ----------
-        save_fig_path : str, optional
-            Output directory when saving figures.
+        save_fig_path : str or None, optional
+            Output directory when saving figures. If ``None``, uses ``self.output_path``
+            (or ``'.'`` when unset).
         broad_fwhm : float, optional
             Reserved broad-line threshold (kept for compatibility).
         plot_legend : bool, optional
@@ -1584,7 +1595,11 @@ class QSOFit:
             ax.legend(frameon=True, framealpha=0.9, edgecolor='0.3', fontsize=9, ncol=2)
         plt.show()
         if self.save_fig:
-            out_file = os.path.join(save_fig_path, self.sdss_name + '.pdf')
+            save_dir = self.output_path if save_fig_path is None else save_fig_path
+            if save_dir is None:
+                save_dir = '.'
+            os.makedirs(save_dir, exist_ok=True)
+            out_file = os.path.join(save_dir, self.filename + '.pdf')
             fig.savefig(out_file)
             print(f"Saved spectrum plot: {out_file}")
             plt.close(fig)

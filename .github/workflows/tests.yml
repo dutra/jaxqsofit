@@ -27,6 +27,13 @@ jobs:
           pip install -e .
           pip install pytest pytest-cov
 
+      - name: Download DSPS SSP template (tempdata.h5)
+        run: |
+          curl --fail --location --retry 5 --retry-delay 2 \
+            https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5 \
+            --output tempdata.h5
+          test -s tempdata.h5
+
       - name: Run unit tests with coverage
         run: |
           pytest -q tests -m "not integration" \
@@ -62,6 +69,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
           pip install pytest astroquery
+
+      - name: Download DSPS SSP template (tempdata.h5)
+        run: |
+          curl --fail --location --retry 5 --retry-delay 2 \
+            https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5 \
+            --output tempdata.h5
+          test -s tempdata.h5
 
       - name: Run integration tests
         run: |

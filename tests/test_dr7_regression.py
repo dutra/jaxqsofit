@@ -147,7 +147,8 @@ def test_dr7_broad_line_regression(tmp_path: Path):
         err = _safe_err_from_ivar(np.asarray(data["ivar"], dtype=float))
 
         try:
-            q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec, plateid=plate, mjd=mjd, fiberid=fiber)
+            filename = f"{plate:04d}-{mjd}-{fiber:04d}"
+            q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec, filename=filename)
             q.fit(
                 deredden=True,
                 fit_method="optax+nuts",
