@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -94,6 +95,89 @@ class QSOFit:
         if np.isfinite(ra_f) and np.isfinite(dec_f) and (ra_f != -999) and (dec_f != -999):
             return f"ra{ra_f:.5f}_dec{dec_f:.5f}"
         return "result"
+
+    def _posterior_bundle_path(self, save_name=None, save_path=None):
+        """Return the default on-disk path for a saved posterior bundle."""
+        out_name = f"{self.filename}_samples.pkl" if save_name is None else save_name
+        out_dir = self.output_path if save_path is None else save_path
+        if out_dir is None:
+            out_dir = '.'
+        os.makedirs(out_dir, exist_ok=True)
+        return os.path.join(out_dir, out_name)
+
+    @staticmethod
+    def _serialize_for_pickle(value):
+        """Recursively convert model state into pickle-friendly Python objects."""
+        if isinstance(value, dict):
+            return {k: QSOFit._serialize_for_pickle(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return type(value)(QSOFit._serialize_for_pickle(v) for v in value)
+        if isinstance(value, (np.ndarray, np.generic)):
+            return np.asarray(value)
+        if hasattr(value, "shape") and hasattr(value, "dtype"):
+            return np.asarray(value)
+        return value
+
+    def save_posterior_bundle(self, save_name=None, save_path=None):
+        """Persist the fitted object state needed to reload posterior results."""
+        state = {}
+        excluded = {"numpyro_mcmc", "svi", "svi_state"}
+        for key, value in self.__dict__.items():
+            if key in excluded:
+                continue
+            state[key] = self._serialize_for_pickle(value)
+
+        out_file = self._posterior_bundle_path(save_name=save_name, save_path=save_path)
+        with open(out_file, "wb") as fh:
+            pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved posterior bundle: {out_file}")
+        return out_file
+
+    @classmethod
+    def load_from_samples(
+        cls,
+        filename,
+        output_path=None,
+        save_name=None,
+        plot_fig=True,
+        plot_diagnostics=True,
+        kwargs_plot=None,
+        diagnostics_kwargs=None,
+    ):
+        """Load a saved posterior bundle, optionally recreate figures, and return a QSOFit object."""
+        resolved_name = cls._resolve_filename(filename=filename)
+        bundle_name = f"{resolved_name}_samples.pkl" if save_name is None else save_name
+        bundle_dir = '.' if output_path is None else output_path
+        bundle_path = os.path.join(bundle_dir, bundle_name)
+        if not os.path.exists(bundle_path):
+            raise FileNotFoundError(f"Posterior bundle not found: {bundle_path}")
+
+        with open(bundle_path, "rb") as fh:
+            state = pickle.load(fh)
+
+        obj = cls(
+            lam=state["lam_in"],
+            flux=state["flux_in"],
+            err=state.get("err_in"),
+            z=state.get("z", 0.0),
+            ra=state.get("ra", -999),
+            dec=state.get("dec", -999),
+            filename=state.get("filename", resolved_name),
+            output_path=output_path if output_path is not None else state.get("output_path"),
+            wdisp=state.get("wdisp"),
+        )
+        obj.__dict__.update(state)
+        obj.install_path = os.path.dirname(os.path.abspath(__file__))
+
+        if plot_fig:
+            plot_kwargs = {} if kwargs_plot is None else dict(kwargs_plot)
+            if "show_plot" not in plot_kwargs:
+                plot_kwargs["show_plot"] = False
+            obj.plot_fig(**plot_kwargs)
+        if plot_diagnostics:
+            diag_kwargs = {} if diagnostics_kwargs is None else dict(diagnostics_kwargs)
+            obj.plot_mcmc_diagnostics(**diag_kwargs)
+        return obj
 
     def fit(self, name=None, deredden=True,
             wave_range=None, wave_mask=None, save_fits_name=None,
@@ -310,6 +394,7 @@ class QSOFit:
             self.save_result(self.conti_result, self.conti_result_type, self.conti_result_name,
                              self.line_result, self.line_result_type, self.line_result_name,
                              save_fits_name)
+            self.save_posterior_bundle()
         if plot_fig:
             self.plot_fig(**kwargs_plot)
 
@@ -405,7 +490,7 @@ class QSOFit:
         init_vals = {'gal_v_kms': 0.0, 'gal_sigma_kms': 150.0} if init_values is None else init_values
         init_strategy = init_to_value(values=init_vals)
         kernel = NUTS(qso_fsps_joint_model, init_strategy=init_strategy, target_accept_prob=target_accept_prob, dense_mass=True, max_tree_depth=8)
-        mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=True)
+        mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=True, jit_model_args=False)
         rng_key = jax.random.PRNGKey(0)
         mcmc.run(
             rng_key,

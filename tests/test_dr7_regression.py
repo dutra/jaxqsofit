@@ -34,6 +34,9 @@ DR7_CAT_URLS = (
     f"http://quasar.astro.illinois.edu/BH_mass/data/catalogs/{DR7_CAT_NAME}",
 )
 
+# Fixed DR7 catalog row indices for a deterministic regression sample.
+DEFAULT_DR7_SAMPLE_INDICES = (0, 1, 2)
+
 # line_key -> (catalog_fwhm_col, catalog_logl_col, rest_wavelength_A)
 LINE_MAP = {
     "CIV_br": ("FWHM_CIV", "LOGL_CIV", 1549.06),
@@ -66,13 +69,12 @@ def _safe_err_from_ivar(ivar: np.ndarray) -> np.ndarray:
     return err
 
 
-def _rmse(x: np.ndarray, y: np.ndarray) -> float:
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    m = np.isfinite(x) & np.isfinite(y)
-    if np.sum(m) == 0:
-        return np.nan
-    return float(np.sqrt(np.mean((x[m] - y[m]) ** 2)))
+def _parse_sample_indices() -> tuple[int, ...]:
+    """Return deterministic DR7 row indices from env or the default sample."""
+    raw = os.getenv("JAXQSOFIT_DR7_SAMPLE_INDICES", "").strip()
+    if not raw:
+        return DEFAULT_DR7_SAMPLE_INDICES
+    return tuple(int(part.strip()) for part in raw.split(",") if part.strip())
 
 
 def _flux_to_luminosity(flux_1e17: float, z: float) -> float:
@@ -91,8 +93,7 @@ def test_dr7_broad_line_regression(tmp_path: Path):
     SkyCoord = astropy_coords.SkyCoord
     u = astropy_units
 
-    nqso = int(os.getenv("JAXQSOFIT_DR7_NQSO", "3"))
-    rng = np.random.default_rng(int(os.getenv("JAXQSOFIT_DR7_SEED", "123")))
+    sample_indices = _parse_sample_indices()
 
     try:
         cat_path = _download_dr7_catalog(tmp_path / "dr7_cache")
@@ -103,11 +104,12 @@ def test_dr7_broad_line_regression(tmp_path: Path):
         with gzip.open(cat_path, "rb") as f:
             cat = fits.open(f)
             rows = cat[1].data
-            nall = len(rows)
-            if nall == 0:
+            if len(rows) == 0:
                 pytest.skip("DR7 catalog is empty")
-            sample_idx = rng.choice(np.arange(nall), size=min(nqso, nall), replace=False)
-            sample = rows[sample_idx]
+            valid_indices = [idx for idx in sample_indices if 0 <= idx < len(rows)]
+            if len(valid_indices) == 0:
+                pytest.skip("Requested DR7 sample indices are outside the catalog bounds")
+            sample = [rows[idx] for idx in valid_indices]
     except Exception as exc:
         pytest.skip(f"Could not read DR7 catalog: {exc}")
 
@@ -206,17 +208,18 @@ def test_dr7_broad_line_regression(tmp_path: Path):
         pytest.skip("No valid DR7 line measurements collected in this run")
 
     res = pd.DataFrame(out_rows)
-    fwhm_rmse = _rmse(res["fwhm_fit"].values, res["fwhm_cat"].values)
-    logl_rmse = _rmse(res["logl_fit"].values, res["logl_cat"].values)
+    frac_fwhm_err = np.abs(res["fwhm_fit"] - res["fwhm_cat"]) / res["fwhm_cat"]
+    dlogl = np.abs(res["logl_fit"] - res["logl_cat"])
 
-    print(fwhm_rmse)
-    print(logl_rmse)
-
-    print(res["fwhm_fit"].values, res["fwhm_cat"].values)
-    print(res["logl_fit"].values, res["logl_cat"].values)
+    print("Sample indices:", sample_indices)
+    print("Median frac FWHM error:", float(np.median(frac_fwhm_err)))
+    print("Median |dlogL|:", float(np.median(dlogl)))
+    print("Frac with frac_fwhm_err < 0.5:", float(np.mean(frac_fwhm_err < 0.5)))
+    print(res[["plate", "mjd", "fiber", "line", "fwhm_fit", "fwhm_cat", "logl_fit", "logl_cat"]])
 
     # Tolerant regression gates (model differs from legacy PyQSOFit implementation).
-    assert np.isfinite(fwhm_rmse)
-    assert np.isfinite(logl_rmse)
-    assert fwhm_rmse < 1800.0
-    assert logl_rmse < 0.3
+    assert np.all(np.isfinite(frac_fwhm_err))
+    assert np.all(np.isfinite(dlogl))
+    assert np.median(frac_fwhm_err) < 0.35
+    assert np.median(dlogl) < 0.2
+    assert np.mean(frac_fwhm_err < 0.5) > 0.7
