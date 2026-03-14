@@ -1610,7 +1610,15 @@ class QSOFit:
                 if len(lo) == len(self.wave) and _show_component(0.5 * (np.asarray(lo) + np.asarray(hi))):
                     ax.fill_between(self.wave, lo, hi, color=color, alpha=sigma_alpha, linewidth=0, zorder=0)
 
-        ax.plot(self.wave_prereduced, self.flux_prereduced, 'k', lw=1, label='data', zorder=2)
+        ax.plot(
+            self.wave_prereduced,
+            self.flux_prereduced,
+            'k',
+            lw=1,
+            label='data',
+            zorder=2,
+            rasterized=True,
+        )
         ax.plot(self.wave, self.model_total, color='b', lw=1.8, label='total model', zorder=6)
         if _show_component(self.host):
             ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host', zorder=4)
@@ -1631,9 +1639,24 @@ class QSOFit:
             ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, zorder=5)
         if len(self.f_line_model) == len(self.wave):
             if _show_component(self.f_line_model):
-                ax.plot(self.wave, self.f_line_model, color='lightskyblue', lw=1.5, label='lines', zorder=5)
+                ax.plot(
+                    self.wave,
+                    self.f_line_model,
+                    color='lightskyblue',
+                    lw=1.5,
+                    label='lines',
+                    zorder=5,
+                    rasterized=True,
+                )
             else:
-                ax.plot(self.wave, self.f_line_model, color='lightskyblue', lw=1.5, zorder=5)
+                ax.plot(
+                    self.wave,
+                    self.f_line_model,
+                    color='lightskyblue',
+                    lw=1.5,
+                    zorder=5,
+                    rasterized=True,
+                )
 
         # Plot individual Gaussian line components: broad (*_br) in red, narrow in green.
         if (hasattr(self, 'line_component_amp_median')
@@ -1660,11 +1683,29 @@ class QSOFit:
                 is_broad = cname.endswith('_br') or ('_br' in cname)
                 if is_broad:
                     lbl = 'broad comps' if (show_line_leg and not drew_broad_label) else None
-                    ax.plot(self.wave, prof, color='red', lw=0.7, alpha=0.35, zorder=3, label=lbl)
+                    ax.plot(
+                        self.wave,
+                        prof,
+                        color='red',
+                        lw=0.7,
+                        alpha=0.35,
+                        zorder=3,
+                        label=lbl,
+                        rasterized=True,
+                    )
                     drew_broad_label = True
                 else:
                     lbl = 'narrow comps' if (show_line_leg and not drew_narrow_label) else None
-                    ax.plot(self.wave, prof, color='green', lw=0.7, alpha=0.25, zorder=3, label=lbl)
+                    ax.plot(
+                        self.wave,
+                        prof,
+                        color='green',
+                        lw=0.7,
+                        alpha=0.25,
+                        zorder=3,
+                        label=lbl,
+                        rasterized=True,
+                    )
                     drew_narrow_label = True
 
         ax.set_xlim(self.wave.min(), self.wave.max())
@@ -1710,7 +1751,15 @@ class QSOFit:
 
         if plot_residual and len(self.model_total) == len(self.wave) and ax_resid is not None:
             resid = self.flux - self.model_total
-            ax_resid.plot(self.wave, resid, color='gray', ls='dotted', lw=1.0, zorder=2)
+            ax_resid.plot(
+                self.wave,
+                resid,
+                color='gray',
+                ls='dotted',
+                lw=1.0,
+                zorder=2,
+                rasterized=True,
+            )
             ax_resid.axhline(0.0, color='k', ls='--', lw=0.8, zorder=1)
             r = resid[np.isfinite(resid)]
             if r.size > 0:
