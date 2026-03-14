@@ -1608,7 +1608,16 @@ class QSOFit:
                     continue
                 lo, hi = self.pred_bands[key]
                 if len(lo) == len(self.wave) and _show_component(0.5 * (np.asarray(lo) + np.asarray(hi))):
-                    ax.fill_between(self.wave, lo, hi, color=color, alpha=sigma_alpha, linewidth=0, zorder=0)
+                    ax.fill_between(
+                        self.wave,
+                        lo,
+                        hi,
+                        color=color,
+                        alpha=sigma_alpha,
+                        linewidth=0,
+                        zorder=0,
+                        rasterized=True,
+                    )
 
         ax.plot(
             self.wave_prereduced,
@@ -1619,24 +1628,24 @@ class QSOFit:
             zorder=2,
             rasterized=True,
         )
-        ax.plot(self.wave, self.model_total, color='b', lw=1.8, label='total model', zorder=6)
+        ax.plot(self.wave, self.model_total, color='b', lw=1.8, label='total model', zorder=6, rasterized=True)
         if _show_component(self.host):
-            ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host', zorder=4)
+            ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host', zorder=4, rasterized=True)
         else:
-            ax.plot(self.wave, self.host, color='purple', lw=1.8, zorder=4)
+            ax.plot(self.wave, self.host, color='purple', lw=1.8, zorder=4, rasterized=True)
         if _show_component(self.f_pl_model):
-            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, label='PL', zorder=5)
+            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, label='PL', zorder=5, rasterized=True)
         else:
-            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, zorder=5)
+            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, zorder=5, rasterized=True)
         fe_total_model = self.f_fe_mgii_model + self.f_fe_balmer_model
         if _show_component(fe_total_model):
-            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='FeII', zorder=5)
+            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='FeII', zorder=5, rasterized=True)
         else:
-            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, zorder=5)
+            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, zorder=5, rasterized=True)
         if _show_component(self.f_bc_model):
-            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer cont.', zorder=5)
+            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer cont.', zorder=5, rasterized=True)
         else:
-            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, zorder=5)
+            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, zorder=5, rasterized=True)
         if len(self.f_line_model) == len(self.wave):
             if _show_component(self.f_line_model):
                 ax.plot(
@@ -1785,7 +1794,7 @@ class QSOFit:
                 save_dir = '.'
             os.makedirs(save_dir, exist_ok=True)
             out_file = os.path.join(save_dir, self.filename + '.pdf')
-            fig.savefig(out_file)
+            fig.savefig(out_file, dpi=150)
             print(f"Saved spectrum plot: {out_file}")
             plt.close(fig)
         self.fig = fig
