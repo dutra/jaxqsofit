@@ -1786,20 +1786,20 @@ class QSOFit:
         )
         ax.plot(self.wave, self.model_total, color='b', lw=1.8, label='total model', zorder=6, rasterized=True)
         if _show_component(self.host):
-            ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host', zorder=4, rasterized=True)
+            ax.plot(self.wave, self.host, color='purple', lw=1.8, label='host galaxy', zorder=4, rasterized=True)
         else:
             ax.plot(self.wave, self.host, color='purple', lw=1.8, zorder=4, rasterized=True)
         if _show_component(self.f_pl_model):
-            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, label='PL', zorder=5, rasterized=True)
+            ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, label='power law', zorder=5, rasterized=True)
         else:
             ax.plot(self.wave, self.f_pl_model, color='orange', lw=1.5, zorder=5, rasterized=True)
         fe_total_model = self.f_fe_mgii_model + self.f_fe_balmer_model
         if _show_component(fe_total_model):
-            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='FeII', zorder=5, rasterized=True)
+            ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label='Fe II', zorder=5, rasterized=True)
         else:
             ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, zorder=5, rasterized=True)
         if _show_component(self.f_bc_model):
-            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer cont.', zorder=5, rasterized=True)
+            ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, label='Balmer continuum', zorder=5, rasterized=True)
         else:
             ax.plot(self.wave, self.f_bc_model, color='y', lw=1.2, zorder=5, rasterized=True)
         if len(self.f_line_model) == len(self.wave):
@@ -1809,7 +1809,7 @@ class QSOFit:
                     self.f_line_model,
                     color='lightskyblue',
                     lw=1.5,
-                    label='lines',
+                    label='total lines',
                     zorder=5,
                     rasterized=True,
                 )
@@ -1819,6 +1819,7 @@ class QSOFit:
                     self.f_line_model,
                     color='lightskyblue',
                     lw=1.5,
+                    label='total lines',
                     zorder=5,
                     rasterized=True,
                 )
@@ -1847,7 +1848,7 @@ class QSOFit:
                 cname = str(comp_labels[i]).lower()
                 is_broad = cname.endswith('_br') or ('_br' in cname)
                 if is_broad:
-                    lbl = 'broad comps' if (show_line_leg and not drew_broad_label) else None
+                    lbl = 'broad components' if (show_line_leg and not drew_broad_label) else None
                     ax.plot(
                         self.wave,
                         prof,
@@ -1860,7 +1861,7 @@ class QSOFit:
                     )
                     drew_broad_label = True
                 else:
-                    lbl = 'narrow comps' if (show_line_leg and not drew_narrow_label) else None
+                    lbl = 'narrow components' if (show_line_leg and not drew_narrow_label) else None
                     ax.plot(
                         self.wave,
                         prof,
@@ -1898,17 +1899,18 @@ class QSOFit:
         ]
         xlo, xhi = ax.get_xlim()
         y_top = ax.get_ylim()[1]
+        text_x_offset = 0.01 * (xhi - xlo)
         for label, lam0 in broad_line_markers:
             if xlo <= lam0 <= xhi:
                 ax.axvline(lam0, color="gray", ls="--", lw=0.8, alpha=0.35, zorder=1)
                 ax.text(
-                    lam0,
+                    lam0 - text_x_offset,
                     y_top * 0.985,
                     label,
                     rotation=90,
                     va="top",
                     ha="center",
-                    fontsize=9,
+                    fontsize=12,
                     color="dimgray",
                     alpha=0.9,
                     zorder=7,
@@ -1941,7 +1943,7 @@ class QSOFit:
         ax.set_ylabel(r'$f_{\lambda}\ (10^{-17}\ \mathrm{erg}\ \mathrm{s}^{-1}\ \mathrm{cm}^{-2}\ \AA^{-1})$', fontsize=20)
         self._style_axis(ax)
         if plot_legend:
-            ax.legend(frameon=True, framealpha=0.9, edgecolor='0.3', fontsize=9, ncol=2)
+            ax.legend(loc="upper right", frameon=True, framealpha=0.9, fontsize=12, ncol=2)
         if show_plot:
             plt.show()
         if self.save_fig:
