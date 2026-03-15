@@ -1,4 +1,4 @@
-# JaxQSOFit
+# JAXQSOFit
 
 <p align="center">
   <img src="logo.png" alt="JaxQSOFit logo" width="220">
@@ -25,7 +25,7 @@ Bayesian quasar spectral fitting with JAX + NumPyro, including:
 
 ## Citation
 
-If you use JaxQSOFit in published work, please cite:
+If you use JAXQSOFit in published work, please cite:
 
 - Shen et al. (2019), *ApJS*, 241, 34:
   `https://ui.adsabs.harvard.edu/abs/2019ApJS..241...34S/abstract`
@@ -36,7 +36,7 @@ If you use JaxQSOFit in published work, please cite:
 
 ## Key Differences vs PyQSOFit
 
-JaxQSOFit is designed around a **joint Bayesian model** of AGN and host components, rather than fitting them in separate stages.
+JAXQSOFit is designed around a **joint Bayesian model** of AGN and host components, rather than fitting them in separate stages.
 
 - **Joint host+AGN inference**:
   Host galaxy SPS (DSPS SSP mixture + LOSVD) is fit simultaneously with AGN continuum and lines.
