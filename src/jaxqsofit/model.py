@@ -56,6 +56,14 @@ def _many_gauss_lnlam(lnlam, amps, mus, sigs):
     return jnp.sum(amps[None, :] * jnp.exp(-0.5 * z * z), axis=1)
 
 
+def _broad_line_mask(names):
+    """Return a float mask identifying broad-line components by name."""
+    return np.asarray(
+        [str(name).lower().endswith('_br') or ('_br' in str(name).lower()) for name in names],
+        dtype=np.float64,
+    )
+
+
 def _synth_ab_mag_from_grid(wave_obs, flam_obs, filt_trans):
     """Compute an AB magnitude from flux density and filter transmission on one grid."""
     c_ang_s = 2.99792458e18
@@ -801,18 +809,27 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         amps = amp_group[_np_to_jnp(tied_line_meta['fgroup']).astype(int)] * _np_to_jnp(tied_line_meta['flux_ratio'])
         mus = tied_line_meta['ln_lambda0'] + dmu
 
-        line_model_intrinsic = _many_gauss_lnlam(lnwave, amps, mus, sigs)
+        broad_mask = _np_to_jnp(_broad_line_mask(tied_line_meta.get('names', [])))
+        line_model_broad_intrinsic = _many_gauss_lnlam(lnwave, amps * broad_mask, mus, sigs)
+        line_model_narrow_intrinsic = _many_gauss_lnlam(lnwave, amps * (1.0 - broad_mask), mus, sigs)
+        line_model_intrinsic = line_model_broad_intrinsic + line_model_narrow_intrinsic
         numpyro.deterministic('line_amp_per_component', amps)
         numpyro.deterministic('line_mu_per_component', mus)
         numpyro.deterministic('line_sig_per_component', sigs)
     else:
+        line_model_broad_intrinsic = jnp.zeros_like(wave)
+        line_model_narrow_intrinsic = jnp.zeros_like(wave)
         line_model_intrinsic = jnp.zeros_like(wave)
 
     gal_model = gal_model_intrinsic
+    line_model_broad = line_model_broad_intrinsic
+    line_model_narrow = line_model_narrow_intrinsic
     line_model = line_model_intrinsic
     if fit_poly:
         gal_model = gal_model * poly_model
-        line_model = line_model * poly_model
+        line_model_broad = line_model_broad * poly_model
+        line_model_narrow = line_model_narrow * poly_model
+        line_model = line_model_broad + line_model_narrow
 
     frac_jitter = numpyro.sample('frac_jitter', dist.HalfNormal(_cfg_halfnorm('frac_jitter')))
     add_jitter = numpyro.sample('add_jitter', dist.HalfNormal(_cfg_halfnorm('add_jitter', ref_scale=jnp.mean(err))))
@@ -827,7 +844,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     scale_psf = jnp.asarray(1.0)
     agn_model_psf = agn_model
     gal_model_psf = gal_model
-    line_model_psf = line_model
+    line_model_broad_psf = line_model_broad
+    line_model_narrow_psf = line_model_narrow
+    line_model_psf = line_model_broad_psf + line_model_narrow_psf
     psf_model = agn_model_psf + gal_model_psf + line_model_psf
     use_psf_phot = (
         bool(use_psf_phot)
@@ -842,7 +861,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         scale_psf = 10.0 ** (-0.4 * delta_m_psf)
         agn_model_psf = scale_psf * agn_model
         gal_model_psf = scale_psf * eta_psf * gal_model
-        line_model_psf = scale_psf * line_model
+        line_model_broad_psf = scale_psf * line_model_broad
+        line_model_narrow_psf = scale_psf * eta_psf * line_model_narrow
+        line_model_psf = line_model_broad_psf + line_model_narrow_psf
         psf_model = agn_model_psf + gal_model_psf + line_model_psf
 
         wave_obs = wave * (1.0 + z_qso)
@@ -864,7 +885,11 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     numpyro.deterministic('agn_model', agn_model)
     numpyro.deterministic('gal_model_intrinsic', gal_model_intrinsic)
     numpyro.deterministic('gal_model', gal_model)
+    numpyro.deterministic('line_model_broad_intrinsic', line_model_broad_intrinsic)
+    numpyro.deterministic('line_model_narrow_intrinsic', line_model_narrow_intrinsic)
     numpyro.deterministic('line_model_intrinsic', line_model_intrinsic)
+    numpyro.deterministic('line_model_broad', line_model_broad)
+    numpyro.deterministic('line_model_narrow', line_model_narrow)
     numpyro.deterministic('line_model', line_model)
     numpyro.deterministic('continuum_model', continuum_model)
     numpyro.deterministic('edge_additive_model', edge_additive_model)
@@ -874,6 +899,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     numpyro.deterministic('scale_psf', scale_psf)
     numpyro.deterministic('agn_model_psf', agn_model_psf)
     numpyro.deterministic('gal_model_psf', gal_model_psf)
+    numpyro.deterministic('line_model_broad_psf', line_model_broad_psf)
+    numpyro.deterministic('line_model_narrow_psf', line_model_narrow_psf)
     numpyro.deterministic('line_model_psf', line_model_psf)
     numpyro.deterministic('psf_model', psf_model)
     numpyro.deterministic('PL_norm_eff', pl_norm)

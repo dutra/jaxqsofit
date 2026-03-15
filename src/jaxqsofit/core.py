@@ -148,6 +148,8 @@ class QSOFit:
             'f_poly_model',
             'agn_model',
             'gal_model',
+            'line_model_broad',
+            'line_model_narrow',
             'line_model',
             'continuum_model',
             'model',
@@ -160,6 +162,8 @@ class QSOFit:
             'scale_psf',
             'agn_model_psf',
             'gal_model_psf',
+            'line_model_broad_psf',
+            'line_model_narrow_psf',
             'line_model_psf',
             'psf_model',
         ]
@@ -1142,11 +1146,15 @@ class QSOFit:
         self.f_poly_model = np.median(np.asarray(pred_out['f_poly_model']), axis=0)
         self.qso = np.median(np.asarray(pred_out['agn_model']), axis=0)
         self.host = np.median(np.asarray(pred_out['gal_model']), axis=0)
+        self.line_broad = np.median(np.asarray(pred_out['line_model_broad']), axis=0) if 'line_model_broad' in pred_out else np.full_like(self.qso, np.nan)
+        self.line_narrow = np.median(np.asarray(pred_out['line_model_narrow']), axis=0) if 'line_model_narrow' in pred_out else np.full_like(self.qso, np.nan)
         self.f_line_model = np.median(np.asarray(pred_out['line_model']), axis=0)
         self.f_conti_model = np.median(np.asarray(pred_out['continuum_model']), axis=0)
         self.model_total = np.median(np.asarray(pred_out['model']), axis=0)
         self.qso_psf = np.median(np.asarray(pred_out['agn_model_psf']), axis=0) if 'agn_model_psf' in pred_out else np.full_like(self.model_total, np.nan)
         self.host_psf = np.median(np.asarray(pred_out['gal_model_psf']), axis=0) if 'gal_model_psf' in pred_out else np.full_like(self.model_total, np.nan)
+        self.line_broad_psf = np.median(np.asarray(pred_out['line_model_broad_psf']), axis=0) if 'line_model_broad_psf' in pred_out else np.full_like(self.model_total, np.nan)
+        self.line_narrow_psf = np.median(np.asarray(pred_out['line_model_narrow_psf']), axis=0) if 'line_model_narrow_psf' in pred_out else np.full_like(self.model_total, np.nan)
         self.line_psf = np.median(np.asarray(pred_out['line_model_psf']), axis=0) if 'line_model_psf' in pred_out else np.full_like(self.model_total, np.nan)
         self.psf_model = np.median(np.asarray(pred_out['psf_model']), axis=0) if 'psf_model' in pred_out else np.full_like(self.model_total, np.nan)
         self.fsps_weights_median = np.median(np.asarray(pred_out['fsps_weights']), axis=0)
@@ -2359,10 +2367,11 @@ class QSOFit:
                 # Keep component plotting consistent with polynomial correction if enabled.
                 if hasattr(self, 'f_poly_model') and len(self.f_poly_model) == len(prof):
                     prof = prof * self.f_poly_model
-                if use_psf_space:
-                    prof = psf_scale * prof
                 cname = str(comp_labels[i]).lower()
                 is_broad = cname.endswith('_br') or ('_br' in cname)
+                if use_psf_space:
+                    line_scale = psf_scale if is_broad else psf_scale * float(getattr(self, 'eta_psf', 1.0))
+                    prof = line_scale * prof
                 if is_broad:
                     lbl = 'broad components' if (show_line_leg and not drew_broad_label) else None
                     ax.plot(
