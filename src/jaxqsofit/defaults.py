@@ -193,7 +193,7 @@ def build_default_prior_config(
 
     cfg: Dict[str, Any] = {
         "log_cont_norm": {"loc": np.log(max(fscale, 1e-8)), "scale": 0.3},
-        "PL_slope": {"loc": -1.5, "scale": 0.4, "low": -3.5, "high": 0.3},
+        "PL_slope": {"loc": -1.5, "scale": 0.4},
         "log_frac_host": {"loc": 0.0, "scale": 2.0, "df": 3.0},
         "tau_host": {"scale": 1.0},
         "raw_w": {"loc": -0.5, "scale": 1.0},

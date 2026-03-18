@@ -44,7 +44,13 @@ def _normalize_template_flux(flux: np.ndarray, target_amp: float = 1.0) -> np.nd
     return f * (target_amp / robust)
 
 
-def _powerlaw_jax(wave, pl_norm, pl_slope, pivot=3000.0):
+def _spectrum_center_pivot(wave):
+    """Use the midpoint of the fitted wavelength range as the power-law pivot."""
+    wave = jnp.asarray(wave)
+    return jnp.maximum(0.5 * (wave[0] + wave[-1]), 1e-8)
+
+
+def _powerlaw_jax(wave, pl_norm, pl_slope, pivot):
     """Evaluate a power-law continuum at input wavelengths."""
     x = jnp.clip(wave / pivot, 1e-8, None)
     return pl_norm * x ** pl_slope
@@ -333,7 +339,15 @@ def reconstruct_posterior_components(
         )
 
         agn_amp = cont_norm[i] * (1.0 - frac_host[i])
-        pl_model = np.asarray(_powerlaw_jax(wave_out, pl_norm=agn_amp, pl_slope=pl_slope[i], pivot=3000.0), dtype=float)
+        pl_model = np.asarray(
+            _powerlaw_jax(
+                wave_out,
+                pl_norm=agn_amp,
+                pl_slope=pl_slope[i],
+                pivot=_spectrum_center_pivot(wave_out),
+            ),
+            dtype=float,
+        )
         fe_uv_model = np.asarray(
             _fe_template_component(wave_out, fe_uv_wave, fe_uv_flux, fe_uv_norm[i], fe_uv_fwhm[i], fe_uv_shift[i]),
             dtype=float,
@@ -649,20 +663,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     agn_amp = cont_norm * (1.0 - frac_host)
     if fit_pl:
         pl_norm = agn_amp
-        pl_slope_cfg = prior_config['PL_slope']
         pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
-        if isinstance(pl_slope_cfg, dict) and ('low' in pl_slope_cfg and 'high' in pl_slope_cfg):
-            pl_slope = numpyro.sample(
-                'PL_slope',
-                dist.TruncatedNormal(
-                    loc=pl_slope_loc,
-                    scale=pl_slope_scale,
-                    low=pl_slope_cfg['low'],
-                    high=pl_slope_cfg['high'],
-                ),
-            )
-        else:
-            pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
+        pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
     else:
         pl_norm = jnp.asarray(0.0)
         pl_slope = jnp.asarray(0.0)
@@ -697,7 +699,12 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         balmer_vel = jnp.asarray(3000.0)
 
     if fit_pl:
-        pl_model_intrinsic = _powerlaw_jax(wave, pl_norm=pl_norm, pl_slope=pl_slope, pivot=3000.0)
+        pl_model_intrinsic = _powerlaw_jax(
+            wave,
+            pl_norm=pl_norm,
+            pl_slope=pl_slope,
+            pivot=_spectrum_center_pivot(wave),
+        )
     else:
         pl_model_intrinsic = jnp.zeros_like(wave)
     fe_uv_model_intrinsic = _fe_template_component(wave, fe_uv_wave, fe_uv_flux, fe_uv_norm, fe_uv_fwhm, fe_uv_shift)
