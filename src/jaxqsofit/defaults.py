@@ -166,6 +166,7 @@ def build_default_prior_config(
     line_config: Dict[str, Any] | None = None,
     include_elg_narrow_lines: bool = False,
     include_high_ionization_lines: bool = False,
+    pl_pivot: float | None = None,
 ) -> Dict[str, Any]:
     """Build a full prior_config with sane defaults from data flux scale.
 
@@ -181,6 +182,10 @@ def build_default_prior_config(
     include_high_ionization_lines : bool, optional
         If True, append additional high-ionization lines from
         ``DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS`` to the active line table.
+    pl_pivot : float or None, optional
+        Optional manual override for the power-law continuum pivot wavelength in
+        Angstrom. If ``None``, the model uses the midpoint of the fitted rest-frame
+        wavelength coverage.
     """
     f = np.asarray(flux, dtype=float)
     finite = np.isfinite(f)
@@ -194,6 +199,7 @@ def build_default_prior_config(
     cfg: Dict[str, Any] = {
         "log_cont_norm": {"loc": np.log(max(fscale, 1e-8)), "scale": 0.3},
         "PL_slope": {"loc": -1.5, "scale": 0.4},
+        "PL_pivot": None if pl_pivot is None else float(pl_pivot),
         "log_frac_host": {"loc": 0.0, "scale": 2.0, "df": 3.0},
         "tau_host": {"scale": 1.0},
         "raw_w": {"loc": -0.5, "scale": 1.0},

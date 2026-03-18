@@ -36,6 +36,8 @@ def test_selsing_composite_fit_wrms_below_threshold(tmp_path: Path):
     if lam.size < 200:
         pytest.skip("Not enough valid composite pixels")
 
+    prior_config = build_default_prior_config(flux, pl_pivot=3000.0)
+
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.0)
     q.fit(
         deredden=False,
@@ -50,7 +52,7 @@ def test_selsing_composite_fit_wrms_below_threshold(tmp_path: Path):
         plot_fig=False,
         save_fig=False,
         save_result=False,
-        prior_config=build_default_prior_config(flux),
+        prior_config=prior_config,
         optax_steps=int(os.getenv("JAXQSOFIT_SELSING_OPTAX_STEPS", "500")),
         optax_lr=float(os.getenv("JAXQSOFIT_SELSING_OPTAX_LR", "1e-2")),
         nuts_warmup=int(os.getenv("JAXQSOFIT_SELSING_NUTS_WARMUP", "30")),

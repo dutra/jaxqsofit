@@ -10,6 +10,7 @@ def test_build_default_prior_config_has_expected_keys():
     required = [
         'log_cont_norm',
         'PL_slope',
+        'PL_pivot',
         'log_frac_host',
         'tau_host',
         'raw_w',
@@ -31,3 +32,9 @@ def test_build_default_prior_config_scales_with_flux_median():
     got = float(cfg['log_cont_norm']['loc'])
     assert np.isfinite(got)
     assert np.isclose(got, expected)
+
+
+def test_build_default_prior_config_accepts_manual_pl_pivot():
+    flux = np.array([1.0, 2.0, 3.0], dtype=float)
+    cfg = build_default_prior_config(flux, pl_pivot=3000.0)
+    assert cfg["PL_pivot"] == 3000.0

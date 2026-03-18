@@ -50,6 +50,15 @@ def _spectrum_center_pivot(wave):
     return jnp.maximum(0.5 * (wave[0] + wave[-1]), 1e-8)
 
 
+def _resolve_pl_pivot(wave, prior_config):
+    """Return the configured power-law pivot or fall back to the spectrum center."""
+    if prior_config is not None:
+        pivot = prior_config.get("PL_pivot", None)
+        if pivot is not None:
+            return jnp.maximum(jnp.asarray(float(pivot)), 1e-8)
+    return _spectrum_center_pivot(wave)
+
+
 def _powerlaw_jax(wave, pl_norm, pl_slope, pivot):
     """Evaluate a power-law continuum at input wavelengths."""
     x = jnp.clip(wave / pivot, 1e-8, None)
@@ -330,6 +339,7 @@ def reconstruct_posterior_components(
         'continuum': np.zeros((n_use, wave_out.size), dtype=float),
         'edge_additive': np.zeros((n_use, wave_out.size), dtype=float),
     }
+    pl_pivot = float(np.asarray(_resolve_pl_pivot(wave_out, prior_config), dtype=float))
 
     for i in range(n_use):
         host_intrinsic = templates @ fsps_weights[i]
@@ -344,7 +354,7 @@ def reconstruct_posterior_components(
                 wave_out,
                 pl_norm=agn_amp,
                 pl_slope=pl_slope[i],
-                pivot=_spectrum_center_pivot(wave_out),
+                pivot=pl_pivot,
             ),
             dtype=float,
         )
@@ -661,6 +671,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     else:
         frac_host = jnp.asarray(0.0)
     agn_amp = cont_norm * (1.0 - frac_host)
+    pl_pivot = _resolve_pl_pivot(wave, prior_config)
     if fit_pl:
         pl_norm = agn_amp
         pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
@@ -703,7 +714,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             wave,
             pl_norm=pl_norm,
             pl_slope=pl_slope,
-            pivot=_spectrum_center_pivot(wave),
+            pivot=pl_pivot,
         )
     else:
         pl_model_intrinsic = jnp.zeros_like(wave)
