@@ -27,6 +27,8 @@ Bayesian quasar spectral fitting with JAX + NumPyro, including:
 
 - [Read the Docs](https://jaxqsofit.readthedocs.io/)
 
+> #### `JAXQSOFit` is under active development, breaking API changes are expected.
+
 ## Citation
 
 If you use JAXQSOFit in published work, please cite:
