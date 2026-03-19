@@ -20,6 +20,12 @@ from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 from numpyro.optim import optax_to_numpyro
 
+from .custom_components import (
+    CustomComponentSpec,
+    custom_component_site_names,
+    inject_default_custom_component_priors,
+    normalize_custom_components,
+)
 from .defaults import build_default_prior_config
 from .model import (
     C_KMS,
@@ -176,9 +182,9 @@ class QSOFit:
         return "result"
 
     @staticmethod
-    def _predictive_return_sites():
+    def _predictive_return_sites(custom_components=None):
         """Return posterior predictive sites needed for summaries and plots."""
-        return [
+        return_sites = [
             'f_pl_model',
             'f_fe_mgii_model',
             'f_fe_balmer_model',
@@ -205,6 +211,8 @@ class QSOFit:
             'line_model_psf',
             'psf_model',
         ]
+        return_sites += custom_component_site_names(custom_components)
+        return return_sites
 
     def _prepare_psf_photometry(
         self,
@@ -330,6 +338,8 @@ class QSOFit:
     @staticmethod
     def _serialize_for_pickle(value):
         """Recursively convert model state into pickle-friendly Python objects."""
+        if isinstance(value, CustomComponentSpec):
+            return value.to_state()
         if isinstance(value, dict):
             return {k: QSOFit._serialize_for_pickle(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
@@ -338,6 +348,19 @@ class QSOFit:
             return np.asarray(value)
         if hasattr(value, "shape") and hasattr(value, "dtype"):
             return np.asarray(value)
+        return value
+
+    @staticmethod
+    def _deserialize_from_pickle(value):
+        """Rebuild custom serialized objects after unpickling."""
+        if isinstance(value, dict):
+            if value.get("__custom_component__", False):
+                return CustomComponentSpec.from_state(value)
+            return {k: QSOFit._deserialize_from_pickle(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [QSOFit._deserialize_from_pickle(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(QSOFit._deserialize_from_pickle(v) for v in value)
         return value
 
     def save_posterior_bundle(self, save_name=None, save_path=None):
@@ -399,6 +422,7 @@ class QSOFit:
 
         with open(bundle_path, "rb") as fh:
             state = pickle.load(fh)
+        state = cls._deserialize_from_pickle(state)
 
         obj = cls(
             lam=state["lam_in"],
@@ -455,6 +479,7 @@ class QSOFit:
             psf_mag_errs=None,
             psf_bands=None,
             use_psf_phot=False,
+            custom_components=None,
             kwargs_plot=None):
         """Run end-to-end preprocessing, fitting, and optional plotting/saving.
 
@@ -529,6 +554,10 @@ class QSOFit:
         use_psf_phot : bool, optional
             If True, add a PSF-photometry likelihood term and infer PSF/fiber
             scaling plus host leakage.
+        custom_components : sequence[CustomComponentSpec] or None, optional
+            Optional additive continuum components. Use
+            ``make_custom_component`` for general user-defined components or
+            ``make_template_component`` for a template convenience wrapper.
         kwargs_plot : dict or None, optional
             Extra keyword arguments passed to :meth:`plot_fig`.
         """
@@ -556,6 +585,7 @@ class QSOFit:
         self._fit_prior_config = prior_config
         self._fit_dsps_ssp_fn = str(dsps_ssp_fn)
         self._fit_use_psf_phot = bool(use_psf_phot)
+        self._fit_custom_components = normalize_custom_components(custom_components)
 
         self.wave_range = wave_range
         self.wave_mask = wave_mask
@@ -591,6 +621,11 @@ class QSOFit:
 
         if prior_config_input is None:
             prior_config = build_default_prior_config(self.flux)
+        prior_config = inject_default_custom_component_priors(
+            prior_config=prior_config,
+            flux=self.flux,
+            custom_components=self._fit_custom_components,
+        )
         out_params = prior_config.get('out_params', {})
         self.L_conti_wave = np.asarray(out_params.get('cont_loc', []), dtype=float)
         self._fit_prior_config = prior_config
@@ -637,6 +672,7 @@ class QSOFit:
                 psf_mag_errs=psf_mag_errs_use,
                 psf_filter_curves=psf_filter_curves_use,
                 use_psf_phot=use_psf_phot_use,
+                custom_components=self._fit_custom_components,
             )
         elif fit_method == 'optax':
             self.run_fsps_optax_fit(
@@ -658,6 +694,7 @@ class QSOFit:
                 psf_mag_errs=psf_mag_errs_use,
                 psf_filter_curves=psf_filter_curves_use,
                 use_psf_phot=use_psf_phot_use,
+                custom_components=self._fit_custom_components,
             )
         elif fit_method == 'optax+nuts':
             self.run_fsps_optax_nuts_fit(
@@ -683,6 +720,7 @@ class QSOFit:
                 psf_mag_errs=psf_mag_errs_use,
                 psf_filter_curves=psf_filter_curves_use,
                 use_psf_phot=use_psf_phot_use,
+                custom_components=self._fit_custom_components,
             )
         else:
             raise ValueError(f"Unknown fit_method='{fit_method}'. Use 'nuts', 'optax', or 'optax+nuts'.")
@@ -713,6 +751,7 @@ class QSOFit:
                              psf_mag_errs=None,
                              psf_filter_curves=None,
                              use_psf_phot=False,
+                             custom_components=None,
                              init_values=None):
         """Fit the full model using NUTS MCMC and store posterior summaries.
 
@@ -743,8 +782,10 @@ class QSOFit:
         flux = np.asarray(self.flux, dtype=float)
         err = np.asarray(self.err, dtype=float)
 
+        custom_components = normalize_custom_components(custom_components)
         if prior_config is None:
             prior_config = build_default_prior_config(flux)
+        prior_config = inject_default_custom_component_priors(prior_config, flux, custom_components)
         conti_priors = prior_config.get('conti_priors', {})
         line_table = _extract_line_table_from_prior_config(prior_config)
 
@@ -819,13 +860,14 @@ class QSOFit:
             psf_mag_errs=psf_mag_errs,
             psf_filter_curves=psf_filter_curves,
             use_psf_phot=use_psf_phot,
+            custom_components=custom_components,
         )
         samples = mcmc.get_samples()
 
         pred = Predictive(
             qso_fsps_joint_model,
             posterior_samples=samples,
-            return_sites=self._predictive_return_sites(),
+            return_sites=self._predictive_return_sites(custom_components=custom_components),
         )
         pred_out = pred(
             rng_key,
@@ -853,6 +895,7 @@ class QSOFit:
             psf_mag_errs=psf_mag_errs,
             psf_filter_curves=psf_filter_curves,
             use_psf_phot=use_psf_phot,
+            custom_components=custom_components,
         )
 
         self.numpyro_mcmc = mcmc
@@ -881,7 +924,8 @@ class QSOFit:
                            psf_mags=None,
                            psf_mag_errs=None,
                            psf_filter_curves=None,
-                           use_psf_phot=False):
+                           use_psf_phot=False,
+                           custom_components=None):
         """Fit a MAP approximation using staged SVI with an Optax optimizer.
 
         Parameters
@@ -907,8 +951,10 @@ class QSOFit:
         flux = np.asarray(self.flux, dtype=float)
         err = np.asarray(self.err, dtype=float)
 
+        custom_components = normalize_custom_components(custom_components)
         if prior_config is None:
             prior_config = build_default_prior_config(flux)
+        prior_config = inject_default_custom_component_priors(prior_config, flux, custom_components)
         conti_priors = prior_config.get('conti_priors', {})
         line_table = _extract_line_table_from_prior_config(prior_config)
 
@@ -984,6 +1030,7 @@ class QSOFit:
                 psf_mag_errs=psf_mag_errs,
                 psf_filter_curves=psf_filter_curves,
                 use_psf_phot=use_psf_phot,
+                custom_components=custom_components,
                 progress_bar=self.verbose,
             )
             return svi, result
@@ -1037,7 +1084,7 @@ class QSOFit:
         pred = Predictive(
             qso_fsps_joint_model,
             posterior_samples={k: jnp.asarray(v) for k, v in samples.items()},
-            return_sites=self._predictive_return_sites(),
+            return_sites=self._predictive_return_sites(custom_components=custom_components),
         )
         pred_out = pred(
             rng_key,
@@ -1065,6 +1112,7 @@ class QSOFit:
             psf_mag_errs=psf_mag_errs,
             psf_filter_curves=psf_filter_curves,
             use_psf_phot=use_psf_phot,
+            custom_components=custom_components,
         )
 
         self.numpyro_mcmc = None
@@ -1100,7 +1148,8 @@ class QSOFit:
                                 psf_mags=None,
                                 psf_mag_errs=None,
                                 psf_filter_curves=None,
-                                use_psf_phot=False):
+                                use_psf_phot=False,
+                                custom_components=None):
         """Warm-start with Optax MAP, then run NUTS as final inference.
 
         Parameters
@@ -1147,6 +1196,7 @@ class QSOFit:
             psf_mag_errs=psf_mag_errs,
             psf_filter_curves=psf_filter_curves,
             use_psf_phot=use_psf_phot,
+            custom_components=custom_components,
         )
         init_values = getattr(self, 'optax_map_point', None)
         self.run_fsps_numpyro_fit(
@@ -1170,6 +1220,7 @@ class QSOFit:
             psf_mag_errs=psf_mag_errs,
             psf_filter_curves=psf_filter_curves,
             use_psf_phot=use_psf_phot,
+            custom_components=custom_components,
             init_values=init_values,
         )
 
@@ -1201,6 +1252,8 @@ class QSOFit:
         self._pred_total_draws = np.asarray(pred_out['model'])
         self._pred_line_draws = np.asarray(pred_out['line_model'])
         self._pred_psf_draws = np.asarray(pred_out['psf_model']) if 'psf_model' in pred_out else None
+        self.custom_components = {}
+        self._pred_custom_draws = {}
 
         self.f_pl_model = np.median(np.asarray(pred_out['f_pl_model']), axis=0)
         self.f_fe_mgii_model = np.median(np.asarray(pred_out['f_fe_mgii_model']), axis=0)
@@ -1221,6 +1274,11 @@ class QSOFit:
         self.line_psf = np.median(np.asarray(pred_out['line_model_psf']), axis=0) if 'line_model_psf' in pred_out else np.full_like(self.model_total, np.nan)
         self.psf_model = np.median(np.asarray(pred_out['psf_model']), axis=0) if 'psf_model' in pred_out else np.full_like(self.model_total, np.nan)
         self.fsps_weights_median = np.median(np.asarray(pred_out['fsps_weights']), axis=0)
+        for comp in normalize_custom_components(getattr(self, '_fit_custom_components', ())):
+            if comp.deterministic_site_name in pred_out:
+                draws = np.asarray(pred_out[comp.deterministic_site_name])
+                self._pred_custom_draws[comp.output_name] = draws
+                self.custom_components[comp.output_name] = np.median(draws, axis=0)
         self.line_flux = flux - self.f_conti_model
         self.decomposed = True
         if 'delta_m_psf_raw' in samples:
@@ -1258,6 +1316,8 @@ class QSOFit:
             'lines': _band(pred_out['line_model']),
             'conti_plus_lines': _band(cont_plus_lines),
         }
+        for name, draws in self._pred_custom_draws.items():
+            self.pred_bands[name] = _band(draws)
         if self.verbose:
             print("max data        :", np.nanmax(self.flux))
             print("max total model :", np.nanmax(self.model_total))
@@ -1267,6 +1327,8 @@ class QSOFit:
             print("max FeII opt    :", np.nanmax(self.f_fe_balmer_model))
             print("max Balmer cont :", np.nanmax(self.f_bc_model))
             print("max lines       :", np.nanmax(self.f_line_model))
+            for name, model in self.custom_components.items():
+                print(f"max {name:<11}:", np.nanmax(model))
 
         if decompose_host and 'gal_v_kms' in samples and 'gal_sigma_kms' in samples:
             gal_v = float(np.median(np.asarray(samples['gal_v_kms'])))
@@ -1616,6 +1678,7 @@ class QSOFit:
             If provided, use at most the first ``n_draws`` posterior samples.
         return_components : bool, optional
             If True, include per-component draws and medians in the return value.
+            This includes any fitted custom components.
         """
         if not hasattr(self, 'numpyro_samples') or not hasattr(self, 'fsps_grid'):
             raise RuntimeError("No posterior samples available. Run fit() first.")
@@ -1657,6 +1720,7 @@ class QSOFit:
             fe_uv_flux=self.fe_uv_flux,
             fe_op_wave=self.fe_op_wave,
             fe_op_flux=self.fe_op_flux,
+            custom_components=getattr(self, '_fit_custom_components', ()),
             n_draws=n_draws,
             return_components=return_components,
         )
@@ -1669,6 +1733,7 @@ class QSOFit:
         component, reference : str, optional
             Component names. Supported reconstructed names are ``host``, ``PL``,
             ``Fe_uv``, ``Fe_op``, ``Balmer_cont``, ``edge_additive``, and ``continuum``.
+            Any fitted custom component names are also accepted.
         wave0 : float, optional
             Rest-frame wavelength in Angstrom.
         reconstruct : bool, optional
@@ -1683,6 +1748,7 @@ class QSOFit:
                 'Balmer_cont': getattr(self, 'f_bc_model', None),
                 'continuum': getattr(self, 'f_conti_model', None),
             }
+            component_map.update(getattr(self, 'custom_components', {}))
             comp_arr = component_map.get(component)
             ref_arr = component_map.get(reference, getattr(self, 'f_conti_model', None))
             if comp_arr is None or ref_arr is None or len(self.wave) == 0:

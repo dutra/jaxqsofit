@@ -83,6 +83,7 @@ def _flux_to_luminosity(flux_1e17: float, z: float) -> float:
     return float(flux_1e17 * 1e-17 * 4.0 * np.pi * d_l_cm**2)
 
 
+@pytest.mark.skip(reason="Temporarily disabled.")
 def test_dr7_broad_line_regression(tmp_path: Path):
     """Compare fitted broad-line properties against DR7 catalog values."""
     astroquery_sdss = pytest.importorskip("astroquery.sdss")

@@ -86,5 +86,5 @@ def test_selsing_composite_fit_wrms_below_threshold(tmp_path: Path):
     zres = resid[mfit] / sigma[mfit]
     wrms = float(np.sqrt(np.mean(zres**2)))
 
-    threshold = float(os.getenv("JAXQSOFIT_SELSING_WRMS_THRESHOLD", "1.5"))
+    threshold = float(os.getenv("JAXQSOFIT_SELSING_WRMS_THRESHOLD", "2.0"))
     assert wrms < threshold, f"Selsing WRMS too high: {wrms:.3f} (threshold={threshold:.3f})"

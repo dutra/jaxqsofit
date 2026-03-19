@@ -14,6 +14,7 @@ import numpyro.distributions as dist
 
 from dsps import load_ssp_templates
 from dustmaps.sfd import SFDQuery
+from .custom_components import CustomComponentSpec, normalize_custom_components
 
 warnings.filterwarnings("ignore")
 
@@ -102,7 +103,7 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms)
     shift_ln = v_kms / C_KMS
     shifted_wave = jnp.exp(lnwave - shift_ln)
     shifted = jnp.interp(shifted_wave, wave, spectrum, left=0.0, right=0.0)
-    return jnp.convolve(shifted, kern, mode='same')
+    return _convolve_same_length(shifted, kern)
 
 
 def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512):
@@ -114,6 +115,17 @@ def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512):
     k = jnp.exp(-0.5 * (x / sigma_pix) ** 2)
     k = jnp.where(mask, k, 0.0)
     return k / jnp.maximum(jnp.sum(k), 1e-30)
+
+
+def _convolve_same_length(signal, kernel):
+    """Convolve and center-crop so the output matches the signal length."""
+    signal = jnp.asarray(signal)
+    kernel = jnp.asarray(kernel)
+    full = jnp.convolve(signal, kernel, mode='same')
+    n = signal.shape[0]
+    m = full.shape[0]
+    start = jnp.maximum((m - n) // 2, 0)
+    return jax.lax.dynamic_slice(full, (start,), (n,))
 
 
 def _fe_template_component(wave, wave_template, flux_template, norm, fwhm_kms, shift_frac, base_fwhm_kms=900.0):
@@ -160,8 +172,49 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     sigma_ln = jnp.maximum(balmer_vel / C_KMS, 1e-5)
     sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
     kernel = _gaussian_kernel1d(sigma_pix)
-    bc_conv = jnp.convolve(bc, kernel, mode='same')
+    bc_conv = _convolve_same_length(bc, kernel)
     return bc_conv
+
+
+def _cfg_norm_from_prior_config(prior_config, key):
+    """Read Normal/LogNormal `(loc, scale)` parameters from prior config."""
+    cfg = prior_config[key]
+    if isinstance(cfg, dict) and ('loc' in cfg and 'scale' in cfg):
+        return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
+    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
+        return jnp.asarray(cfg[0]), jnp.asarray(cfg[1])
+    return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
+
+
+def _sample_from_prior_config(key, cfg):
+    """Sample one parameter from a lightweight prior config dictionary."""
+    dist_name = str(cfg.get("dist", "Normal")).lower()
+    if dist_name == "normal":
+        return numpyro.sample(key, dist.Normal(jnp.asarray(cfg["loc"]), jnp.asarray(cfg["scale"])))
+    if dist_name == "lognormal":
+        return numpyro.sample(key, dist.LogNormal(jnp.asarray(cfg["loc"]), jnp.asarray(cfg["scale"])))
+    if dist_name == "halfnormal":
+        return numpyro.sample(key, dist.HalfNormal(jnp.asarray(cfg["scale"])))
+    if dist_name == "truncatednormal":
+        return numpyro.sample(
+            key,
+            dist.TruncatedNormal(
+                loc=jnp.asarray(cfg["loc"]),
+                scale=jnp.asarray(cfg["scale"]),
+                low=jnp.asarray(cfg["low"]),
+                high=jnp.asarray(cfg["high"]),
+            ),
+        )
+    raise ValueError(f"Unsupported custom-component prior distribution: {cfg.get('dist')}")
+
+
+def _evaluate_custom_component_jax(wave, samples_or_values, comp, sample_value):
+    """Evaluate one custom component from a sample/value mapping."""
+    params = {
+        param_name: sample_value(samples_or_values, comp.site_name(param_name), default=0.0)
+        for param_name in comp.parameter_priors
+    }
+    return comp.evaluate(wave, params, comp.metadata)
 
 
 @dataclass
@@ -276,6 +329,7 @@ def reconstruct_posterior_components(
     fe_uv_flux: np.ndarray,
     fe_op_wave: np.ndarray,
     fe_op_flux: np.ndarray,
+    custom_components: Sequence[CustomComponentSpec] | None = None,
     n_draws: int | None = None,
     return_components: bool = True,
 ) -> Dict[str, Any]:
@@ -292,6 +346,7 @@ def reconstruct_posterior_components(
     )
     templates = np.asarray(fsps_grid.templates, dtype=float)
     lnwave = np.log(wave_out)
+    custom_components = normalize_custom_components(custom_components)
 
     n_total = int(np.asarray(next(iter(samples.values()))).shape[0]) if len(samples) > 0 else 0
     if n_total == 0:
@@ -339,6 +394,8 @@ def reconstruct_posterior_components(
         'continuum': np.zeros((n_use, wave_out.size), dtype=float),
         'edge_additive': np.zeros((n_use, wave_out.size), dtype=float),
     }
+    for comp in custom_components:
+        component_draws[comp.output_name] = np.zeros((n_use, wave_out.size), dtype=float)
     pl_pivot = float(np.asarray(_resolve_pl_pivot(wave_out, prior_config), dtype=float))
 
     for i in range(n_use):
@@ -370,6 +427,18 @@ def reconstruct_posterior_components(
             _balmer_continuum_jax(wave_out, balmer_norm[i], 15000.0, balmer_tau[i], balmer_vel[i]),
             dtype=float,
         )
+        custom_total = np.zeros_like(wave_out)
+        for comp in custom_components:
+            def _sample_value(samples_dict, key, default=0.0):
+                val = float(np.asarray(samples_dict.get(key, np.full(n_total, default)), dtype=float)[sl][i])
+                return val
+
+            custom_model = np.asarray(
+                _evaluate_custom_component_jax(wave_out, samples, comp, _sample_value),
+                dtype=float,
+            )
+            component_draws[comp.output_name][i] = custom_model
+            custom_total = custom_total + custom_model
 
         poly_model = np.ones_like(wave_out)
         edge_add = np.zeros_like(wave_out)
@@ -397,7 +466,10 @@ def reconstruct_posterior_components(
         fe_uv_model = fe_uv_model * poly_model
         fe_op_model = fe_op_model * poly_model
         bc_model = bc_model * poly_model
-        continuum_model = pl_model + fe_uv_model + fe_op_model + bc_model + host_model + edge_add
+        custom_total = custom_total * poly_model
+        for comp in custom_components:
+            component_draws[comp.output_name][i] = component_draws[comp.output_name][i] * poly_model
+        continuum_model = pl_model + fe_uv_model + fe_op_model + bc_model + custom_total + host_model + edge_add
 
         component_draws['host'][i] = host_model
         component_draws['PL'][i] = pl_model
@@ -620,7 +692,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
                          prior_config=None, decompose_host=True, fit_pl=True, fit_fe=True, fit_bc=True, fit_poly=False,
                          fit_poly_order=2,
                          fit_poly_edge_flex=True, z_qso=0.0, psf_mags=None, psf_mag_errs=None,
-                         psf_filter_curves=None, use_psf_phot=False):
+                         psf_filter_curves=None, use_psf_phot=False,
+                         custom_components: Sequence[CustomComponentSpec] | None = None):
     """Joint AGN+host spectral forward model for NumPyro inference."""
     wave = _np_to_jnp(wave)
     flux = _np_to_jnp(flux)
@@ -633,15 +706,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     fe_op_flux = _np_to_jnp(fe_op_flux)
     z_qso = jnp.asarray(float(z_qso))
     prior_config = {} if prior_config is None else prior_config
-
-    def _cfg_norm(key):
-        """Read Normal/LogNormal `(loc, scale)` parameters from prior config."""
-        cfg = prior_config[key]
-        if isinstance(cfg, dict) and ('loc' in cfg and 'scale' in cfg):
-            return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
-        if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
-            return jnp.asarray(cfg[0]), jnp.asarray(cfg[1])
-        return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
+    custom_components = normalize_custom_components(custom_components)
+    _cfg_norm = lambda key: _cfg_norm_from_prior_config(prior_config, key)
 
     def _cfg_halfnorm(key, ref_scale=None):
         """Read HalfNormal scale from prior config."""
@@ -699,10 +765,10 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         fe_op_shift = jnp.asarray(0.0)
 
     if fit_bc:
-        balmer_norm = numpyro.sample('Balmer_norm', dist.LogNormal(*_cfg_norm('log_Balmer_norm')))
-        balmer_te = jnp.asarray(15000.0) #numpyro.sample('Balmer_Te', dist.Normal(*_cfg_norm('Balmer_Te')))
-        balmer_tau = numpyro.sample('Balmer_Tau', dist.LogNormal(*_cfg_norm('log_Balmer_Tau')))
-        balmer_vel = numpyro.sample('Balmer_vel', dist.LogNormal(*_cfg_norm('log_Balmer_vel')))
+        balmer_norm = numpyro.sample('Balmer_norm', dist.LogNormal(*_cfg_norm_from_prior_config(prior_config, 'log_Balmer_norm')))
+        balmer_te = jnp.asarray(15000.0)
+        balmer_tau = numpyro.sample('Balmer_Tau', dist.LogNormal(*_cfg_norm_from_prior_config(prior_config, 'log_Balmer_Tau')))
+        balmer_vel = numpyro.sample('Balmer_vel', dist.LogNormal(*_cfg_norm_from_prior_config(prior_config, 'log_Balmer_vel')))
     else:
         balmer_norm = jnp.asarray(0.0)
         balmer_te = jnp.asarray(15000.0)
@@ -725,6 +791,18 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     fe_uv_model = fe_uv_model_intrinsic
     fe_op_model = fe_op_model_intrinsic
     bc_model = bc_model_intrinsic
+    custom_models = {}
+    custom_total_model = jnp.zeros_like(wave)
+    for comp in custom_components:
+        def _sample_value(sample_dict, key, default=0.0):
+            cfg = prior_config.get(key, None)
+            if cfg is None:
+                return default
+            return _sample_from_prior_config(key, cfg)
+
+        custom_model_intrinsic = _evaluate_custom_component_jax(wave, prior_config, comp, _sample_value)
+        custom_models[comp.output_name] = custom_model_intrinsic
+        custom_total_model = custom_total_model + custom_model_intrinsic
     poly_model = jnp.ones_like(wave)
     edge_additive_model = jnp.zeros_like(wave)
     if fit_poly:
@@ -764,7 +842,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         fe_uv_model = fe_uv_model * poly_model
         fe_op_model = fe_op_model * poly_model
         bc_model = bc_model * poly_model
-    agn_model = pl_model + fe_uv_model + fe_op_model + bc_model
+        custom_models = {name: model * poly_model for name, model in custom_models.items()}
+        custom_total_model = custom_total_model * poly_model
+    agn_model = pl_model + fe_uv_model + fe_op_model + bc_model + custom_total_model
 
     ntemp = fsps_grid.templates.shape[1]
     if decompose_host:
@@ -900,6 +980,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     numpyro.deterministic('f_fe_balmer_model', fe_op_model)
     numpyro.deterministic('f_bc_model', bc_model)
     numpyro.deterministic('f_poly_model', poly_model)
+    for comp in custom_components:
+        numpyro.deterministic(comp.deterministic_site_name, custom_models[comp.output_name])
     numpyro.deterministic('agn_model', agn_model)
     numpyro.deterministic('gal_model_intrinsic', gal_model_intrinsic)
     numpyro.deterministic('gal_model', gal_model)
