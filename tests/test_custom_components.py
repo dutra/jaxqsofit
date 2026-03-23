@@ -188,6 +188,7 @@ def test_plot_fig_includes_custom_component_trace():
         "smc_like_reddened_pl": (np.full_like(lam, 0.7), np.full_like(lam, 0.9)),
     }
     q.scale_psf = 1.0
+    q.save_fig = False
     q.custom_line_components = {}
     q.line_component_amp_median = np.array([])
     q.line_component_mu_median = np.array([])
