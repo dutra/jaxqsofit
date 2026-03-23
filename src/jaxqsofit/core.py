@@ -340,6 +340,49 @@ class QSOFit:
         os.makedirs(out_dir, exist_ok=True)
         return os.path.join(out_dir, out_name)
 
+    def _intrinsic_powerlaw_draws(self, wave_out=None, apply_psf_scale=False):
+        """Return posterior draws for the intrinsic AGN power law on ``wave_out``."""
+        samples = getattr(self, 'numpyro_samples', None)
+        if samples is None or 'cont_norm' not in samples or 'PL_slope' not in samples:
+            return None
+
+        wave_eval = np.asarray(self.wave if wave_out is None else wave_out, dtype=float)
+        if wave_eval.ndim != 1 or wave_eval.size == 0 or not np.all(np.isfinite(wave_eval)):
+            return None
+
+        cont_norm = np.asarray(samples['cont_norm'], dtype=float).reshape(-1)
+        pl_slope = np.asarray(samples['PL_slope'], dtype=float).reshape(-1)
+        if cont_norm.size == 0 or pl_slope.size == 0:
+            return None
+
+        if 'log_frac_host' in samples:
+            log_frac_host = np.asarray(samples['log_frac_host'], dtype=float).reshape(-1)
+            frac_host = 1.0 / (1.0 + np.exp(-log_frac_host))
+        else:
+            frac_host = np.zeros_like(cont_norm)
+
+        n = min(cont_norm.size, pl_slope.size, frac_host.size)
+        if n == 0:
+            return None
+        cont_norm = cont_norm[:n]
+        pl_slope = pl_slope[:n]
+        frac_host = frac_host[:n]
+
+        prior_config = getattr(self, '_fit_prior_config', None) or {}
+        pivot = prior_config.get('PL_pivot', None)
+        if pivot is None:
+            pivot = 0.5 * (wave_eval[0] + wave_eval[-1])
+        pivot = max(float(pivot), 1e-8)
+
+        x = np.clip(wave_eval / pivot, 1e-8, None)
+        agn_amp = cont_norm * (1.0 - frac_host)
+        draws = agn_amp[:, None] * (x[None, :] ** pl_slope[:, None])
+        if apply_psf_scale:
+            psf_scale = float(getattr(self, 'scale_psf', np.nan))
+            if np.isfinite(psf_scale):
+                draws = psf_scale * draws
+        return draws
+
     @staticmethod
     def _serialize_for_pickle(value):
         """Recursively convert model state into pickle-friendly Python objects."""
@@ -1324,6 +1367,11 @@ class QSOFit:
         self._pred_custom_line_draws = {}
 
         self.f_pl_model = np.median(np.asarray(pred_out['f_pl_model']), axis=0)
+        intrinsic_pl_draws = self._intrinsic_powerlaw_draws()
+        if intrinsic_pl_draws is not None and intrinsic_pl_draws.shape[1] == len(self.wave):
+            self.f_pl_model_intrinsic = np.median(intrinsic_pl_draws, axis=0)
+        else:
+            self.f_pl_model_intrinsic = np.full_like(self.f_pl_model, np.nan)
         self.f_fe_mgii_model = np.median(np.asarray(pred_out['f_fe_mgii_model']), axis=0)
         self.f_fe_balmer_model = np.median(np.asarray(pred_out['f_fe_balmer_model']), axis=0)
         self.f_bc_model = np.median(np.asarray(pred_out['f_bc_model']), axis=0)
@@ -1389,6 +1437,8 @@ class QSOFit:
             'lines': _band(pred_out['line_model']),
             'conti_plus_lines': _band(cont_plus_lines),
         }
+        if intrinsic_pl_draws is not None and intrinsic_pl_draws.shape[1] == len(self.wave):
+            self.pred_bands['PL_intrinsic'] = _band(intrinsic_pl_draws)
         for name, draws in self._pred_custom_draws.items():
             self.pred_bands[name] = _band(draws)
         for name, draws in self._pred_custom_line_draws.items():
@@ -2389,7 +2439,7 @@ class QSOFit:
             )
 
     def plot_fig(self, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylims=None, plot_residual=True, show_title=True,
-                 plot_1sigma=True, sigma_alpha=0.12, show_plot=True, plot_psf_space=False):
+                 plot_1sigma=True, sigma_alpha=0.12, show_plot=True, plot_psf_space=False, plot_intrinsic_powerlaw=False):
         """Plot data, model components, line decomposition, and residuals.
 
         Parameters
@@ -2417,6 +2467,9 @@ class QSOFit:
             If True, plot the PSF-space model/components. In this mode the
             residual panel is suppressed because the observed spectrum remains
             on the fiber scale.
+        plot_intrinsic_powerlaw : bool, optional
+            If True, overlay the intrinsic AGN power law before multiplicative
+            polynomial tilt and additive edge corrections.
         """
         matplotlib.rc('xtick', labelsize=20)
         matplotlib.rc('ytick', labelsize=20)
@@ -2444,12 +2497,15 @@ class QSOFit:
         total_model_plot = self.psf_model if use_psf_space else self.model_total
         host_plot = self.host_psf if use_psf_space else self.host
         pl_plot = psf_scale * self.f_pl_model if use_psf_space else self.f_pl_model
+        pl_intrinsic = np.asarray(getattr(self, 'f_pl_model_intrinsic', []), dtype=float)
+        pl_intrinsic_plot = psf_scale * pl_intrinsic if use_psf_space and pl_intrinsic.size == len(self.wave) else pl_intrinsic
         fe_total_model = psf_scale * (self.f_fe_mgii_model + self.f_fe_balmer_model) if use_psf_space else (self.f_fe_mgii_model + self.f_fe_balmer_model)
         bc_plot = psf_scale * self.f_bc_model if use_psf_space else self.f_bc_model
         line_plot = self.line_psf if use_psf_space else self.f_line_model
         total_model_label = 'total model (PSF)' if use_psf_space else 'total model'
         host_label = 'host galaxy (PSF)' if use_psf_space else 'host galaxy'
         powerlaw_label = 'power law (PSF)' if use_psf_space else 'power law'
+        intrinsic_powerlaw_label = 'intrinsic power law (PSF)' if use_psf_space else 'intrinsic power law'
         fe_label = 'Fe II (PSF)' if use_psf_space else 'Fe II'
         bc_label = 'Balmer continuum (PSF)' if use_psf_space else 'Balmer continuum'
         line_label = 'total lines (PSF)' if use_psf_space else 'total lines'
@@ -2466,6 +2522,7 @@ class QSOFit:
                 'total_model': 'b',
                 'host': 'purple',
                 'PL': 'orange',
+                'PL_intrinsic': 'darkorange',
                 'FeII': 'teal',
                 'Balmer_cont': 'y',
                 'lines': 'lightskyblue',
@@ -2480,6 +2537,20 @@ class QSOFit:
                         lo,
                         hi,
                         color=color,
+                        alpha=sigma_alpha,
+                        linewidth=0,
+                        zorder=0,
+                        rasterized=True,
+                    )
+        if bool(plot_intrinsic_powerlaw) and hasattr(self, 'pred_bands') and not use_psf_space:
+            if 'PL_intrinsic' in self.pred_bands:
+                lo, hi = self.pred_bands['PL_intrinsic']
+                if len(lo) == len(self.wave) and _show_component(0.5 * (np.asarray(lo) + np.asarray(hi))):
+                    ax.fill_between(
+                        self.wave,
+                        lo,
+                        hi,
+                        color='darkorange',
                         alpha=sigma_alpha,
                         linewidth=0,
                         zorder=0,
@@ -2505,6 +2576,20 @@ class QSOFit:
             ax.plot(self.wave, pl_plot, color='orange', lw=1.5, label=powerlaw_label, zorder=5, rasterized=True)
         else:
             ax.plot(self.wave, pl_plot, color='orange', lw=1.5, zorder=5, rasterized=True)
+        if bool(plot_intrinsic_powerlaw) and pl_intrinsic_plot.size == len(self.wave):
+            if _show_component(pl_intrinsic_plot):
+                ax.plot(
+                    self.wave,
+                    pl_intrinsic_plot,
+                    color='darkorange',
+                    lw=1.4,
+                    ls='--',
+                    label=intrinsic_powerlaw_label,
+                    zorder=5,
+                    rasterized=True,
+                )
+            else:
+                ax.plot(self.wave, pl_intrinsic_plot, color='darkorange', lw=1.4, ls='--', zorder=5, rasterized=True)
         if _show_component(fe_total_model):
             ax.plot(self.wave, fe_total_model, color='teal', lw=1.2, label=fe_label, zorder=5, rasterized=True)
         else:
