@@ -1123,6 +1123,11 @@ class QSOFit:
         self._rest_frame(self.lam, self.flux, self.err, self.z)
         self._calculate_sn(self.wave, self.flux)
         self._orignial_spec(self.wave, self.flux, self.err)
+        pl_pivot = prior_config.get("PL_pivot", None)
+        if pl_pivot is None:
+            pl_pivot = _spectrum_center_pivot(self.wave)
+        prior_config["PL_pivot"] = float(np.asarray(pl_pivot, dtype=float))
+        self._fit_prior_config = prior_config
         psf_mags_use, psf_mag_errs_use, _psf_bands_use, psf_filter_curves_use, use_psf_phot_use = self._prepare_psf_photometry(
             wave_obs=self.lam,
             psf_mags=psf_mags,

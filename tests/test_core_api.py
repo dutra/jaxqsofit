@@ -255,6 +255,65 @@ def test_fit_dispatch_optax_nuts(monkeypatch):
     assert called['optax_nuts'] == 1
 
 
+def test_fit_materializes_default_pl_pivot_to_numeric(monkeypatch):
+    lam, flux, err = _make_simple_spectrum()
+    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+
+    monkeypatch.setattr(q, 'run_fsps_optax_fit', lambda **kwargs: None)
+
+    cfg = build_default_prior_config(flux)
+    assert cfg["PL_pivot"] is None
+    q.fit(
+        deredden=False,
+        fit_method='optax',
+        plot_fig=False,
+        save_result=False,
+        prior_config=cfg,
+    )
+
+    pivot = q._fit_prior_config["PL_pivot"]
+    assert isinstance(pivot, float)
+    assert np.isfinite(pivot)
+
+
+def test_fit_preserves_explicit_pl_pivot_value(monkeypatch):
+    lam, flux, err = _make_simple_spectrum()
+    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+
+    monkeypatch.setattr(q, 'run_fsps_optax_fit', lambda **kwargs: None)
+
+    q.fit(
+        deredden=False,
+        fit_method='optax',
+        plot_fig=False,
+        save_result=False,
+        prior_config=build_default_prior_config(flux, pl_pivot=3000.0),
+    )
+
+    assert q._fit_prior_config["PL_pivot"] == 3000.0
+
+
+def test_fit_materializes_missing_pl_pivot_key(monkeypatch):
+    lam, flux, err = _make_simple_spectrum()
+    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+
+    monkeypatch.setattr(q, 'run_fsps_optax_fit', lambda **kwargs: None)
+
+    cfg = build_default_prior_config(flux)
+    cfg.pop("PL_pivot")
+    q.fit(
+        deredden=False,
+        fit_method='optax',
+        plot_fig=False,
+        save_result=False,
+        prior_config=cfg,
+    )
+
+    pivot = q._fit_prior_config["PL_pivot"]
+    assert isinstance(pivot, float)
+    assert np.isfinite(pivot)
+
+
 def test_fit_method_unknown_raises():
     lam, flux, err = _make_simple_spectrum()
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
