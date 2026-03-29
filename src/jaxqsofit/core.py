@@ -1764,6 +1764,8 @@ class QSOFit:
         self._pred_custom_draws = {}
         self.custom_line_components = {}
         self._pred_custom_line_draws = {}
+        self.bi = np.nan
+        self.bi_err = np.nan
 
         self.f_pl_model = np.median(np.asarray(pred_out['f_pl_model']), axis=0)
         intrinsic_pl_draws = self._intrinsic_powerlaw_draws()
@@ -1872,6 +1874,10 @@ class QSOFit:
             self.pred_bands[name] = _band(draws)
         for name, draws in self._pred_custom_line_draws.items():
             self.pred_bands[name] = _band(draws)
+        if bool(getattr(self, '_fit_fit_bal', False)):
+            bi, bi_err = self.balnicity_index()
+            self.bi = float(bi)
+            self.bi_err = float(bi_err) if np.isfinite(bi_err) else np.nan
         if self.verbose:
             print("max data        :", np.nanmax(self.flux))
             print("max total model :", np.nanmax(self.model_total))
