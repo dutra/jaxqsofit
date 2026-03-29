@@ -2369,6 +2369,172 @@ class QSOFit:
         p16, p50, p84 = np.percentile(frac[good], [16.0, 50.0, 84.0])
         return float(p50), float(0.5 * (p84 - p16))
 
+    @staticmethod
+    def _balnicity_index_from_arrays(
+        wave: np.ndarray,
+        bal_sum: np.ndarray,
+        reference: np.ndarray,
+        line_center: float,
+        vmin: float,
+        vmax: float,
+        min_width: float,
+        depth_threshold: float,
+    ) -> tuple[float, list[tuple[float, float]]]:
+        """Compute a simple BI-like integral from a BAL model and reference model."""
+        wave = np.asarray(wave, dtype=float)
+        bal_sum = np.asarray(bal_sum, dtype=float)
+        reference = np.asarray(reference, dtype=float)
+        if wave.ndim != 1 or bal_sum.shape != wave.shape or reference.shape != wave.shape or wave.size < 2:
+            return 0.0, []
+
+        finite = np.isfinite(wave) & np.isfinite(bal_sum) & np.isfinite(reference) & (reference > 0)
+        if not np.any(finite):
+            return 0.0, []
+
+        vel = C_KMS * (float(line_center) / wave - 1.0)
+        sel = finite & (vel >= float(vmin)) & (vel <= float(vmax))
+        if np.count_nonzero(sel) < 2:
+            return 0.0, []
+
+        vel_sel = vel[sel]
+        bal_sel = bal_sum[sel]
+        ref_sel = reference[sel]
+        order = np.argsort(vel_sel)
+        vel_sel = vel_sel[order]
+        bal_sel = bal_sel[order]
+        ref_sel = ref_sel[order]
+
+        flux_norm = 1.0 + bal_sel / ref_sel
+        integrand = 1.0 - flux_norm / 0.9
+        active = np.isfinite(integrand) & (integrand > 0.0) & ((-bal_sel / ref_sel) >= float(depth_threshold))
+        if not np.any(active):
+            return 0.0, []
+
+        bi_total = 0.0
+        troughs: list[tuple[float, float]] = []
+        idx = np.flatnonzero(active)
+        start = idx[0]
+        prev = idx[0]
+        for cur in idx[1:]:
+            if cur != prev + 1:
+                v0 = float(vel_sel[start])
+                v1 = float(vel_sel[prev])
+                if (v1 - v0) >= float(min_width):
+                    bi_total += float(np.trapezoid(integrand[start:prev + 1], vel_sel[start:prev + 1]))
+                    troughs.append((v0, v1))
+                start = cur
+            prev = cur
+        v0 = float(vel_sel[start])
+        v1 = float(vel_sel[prev])
+        if (v1 - v0) >= float(min_width):
+            bi_total += float(np.trapezoid(integrand[start:prev + 1], vel_sel[start:prev + 1]))
+            troughs.append((v0, v1))
+        return float(max(bi_total, 0.0)), troughs
+
+    def balnicity_index(
+        self,
+        component_names=None,
+        line_center: float = 1549.06,
+        vmin: float = 3000.0,
+        vmax: float = 25000.0,
+        min_width: float = 2000.0,
+        depth_threshold: float = 0.1,
+        include_line_emission: bool = True,
+        return_details: bool = False,
+    ):
+        """Return a simple BALnicity-style index from the summed fitted BAL model.
+
+        The BAL model is defined as the sum of selected negative custom
+        components, typically names beginning with ``bal_``. The reference model
+        is the BAL-free AGN continuum, optionally plus the fitted emission-line
+        model. The returned BI uses the standard-style integrand
+        ``1 - f_norm / 0.9`` over contiguous troughs at least ``min_width`` wide
+        and deeper than ``depth_threshold``.
+        """
+        self._ensure_hydrated_from_samples()
+        if not hasattr(self, 'wave') or len(self.wave) == 0:
+            raise RuntimeError("No fitted spectrum available. Run fit() first.")
+
+        custom_models = getattr(self, 'custom_components', {})
+        if component_names is None:
+            selected_names = [name for name in custom_models if str(name).startswith('bal_')]
+        elif isinstance(component_names, str):
+            selected_names = [component_names]
+        else:
+            selected_names = [str(name) for name in component_names]
+        selected_names = [name for name in selected_names if name in custom_models]
+
+        if len(selected_names) == 0:
+            result = {
+                'bi': 0.0,
+                'bi_err': np.nan,
+                'component_names': [],
+                'troughs_kms': [],
+                'line_center': float(line_center),
+                'vmin': float(vmin),
+                'vmax': float(vmax),
+                'min_width': float(min_width),
+                'depth_threshold': float(depth_threshold),
+            }
+            return result if return_details else (0.0, np.nan)
+
+        bal_sum = np.sum([np.asarray(custom_models[name], dtype=float) for name in selected_names], axis=0)
+        qso_model = np.asarray(getattr(self, 'qso', np.zeros_like(self.wave)), dtype=float)
+        line_model = np.asarray(getattr(self, 'f_line_model', np.zeros_like(self.wave)), dtype=float) if include_line_emission else np.zeros_like(self.wave, dtype=float)
+        reference = qso_model - bal_sum + line_model
+
+        bi_med, troughs = self._balnicity_index_from_arrays(
+            wave=np.asarray(self.wave, dtype=float),
+            bal_sum=bal_sum,
+            reference=reference,
+            line_center=float(line_center),
+            vmin=float(vmin),
+            vmax=float(vmax),
+            min_width=float(min_width),
+            depth_threshold=float(depth_threshold),
+        )
+
+        bi_err = np.nan
+        if hasattr(self, 'pred_out') and self.pred_out is not None and hasattr(self, '_pred_custom_draws'):
+            draw_list = [np.asarray(self._pred_custom_draws[name], dtype=float) for name in selected_names if name in self._pred_custom_draws]
+            qso_draws = np.asarray(self.pred_out.get('agn_model', []), dtype=float)
+            line_draws = np.asarray(self.pred_out.get('line_model', []), dtype=float) if include_line_emission else np.zeros_like(qso_draws, dtype=float)
+            if len(draw_list) == len(selected_names) and qso_draws.ndim == 2 and qso_draws.shape[1] == len(self.wave):
+                bal_draws = np.sum(draw_list, axis=0)
+                ref_draws = qso_draws - bal_draws + line_draws
+                bi_draws = []
+                for i in range(qso_draws.shape[0]):
+                    bi_i, _ = self._balnicity_index_from_arrays(
+                        wave=np.asarray(self.wave, dtype=float),
+                        bal_sum=bal_draws[i],
+                        reference=ref_draws[i],
+                        line_center=float(line_center),
+                        vmin=float(vmin),
+                        vmax=float(vmax),
+                        min_width=float(min_width),
+                        depth_threshold=float(depth_threshold),
+                    )
+                    bi_draws.append(bi_i)
+                bi_draws = np.asarray(bi_draws, dtype=float)
+                good = np.isfinite(bi_draws)
+                if np.any(good):
+                    p16, p50, p84 = np.percentile(bi_draws[good], [16.0, 50.0, 84.0])
+                    bi_med = float(p50)
+                    bi_err = float(0.5 * (p84 - p16))
+
+        result = {
+            'bi': float(bi_med),
+            'bi_err': float(bi_err) if np.isfinite(bi_err) else np.nan,
+            'component_names': selected_names,
+            'troughs_kms': troughs,
+            'line_center': float(line_center),
+            'vmin': float(vmin),
+            'vmax': float(vmax),
+            'min_width': float(min_width),
+            'depth_threshold': float(depth_threshold),
+        }
+        return result if return_details else (result['bi'], result['bi_err'])
+
     def _line_profile_from_params(
         self,
         line_key: str,
