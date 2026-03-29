@@ -3084,11 +3084,21 @@ class QSOFit:
             ax.plot(self.wave, bc_plot, color='y', lw=1.2, label=bc_label, zorder=5, rasterized=True)
         else:
             ax.plot(self.wave, bc_plot, color='y', lw=1.2, zorder=5, rasterized=True)
+        bal_legend_drawn = False
         for idx, (name, model) in enumerate(custom_components):
             color = custom_component_colors[idx % len(custom_component_colors)]
-            label = name.replace('_', ' ')
+            is_bal_component = str(name).startswith('bal_')
+            if is_bal_component:
+                label = 'BAL'
+            else:
+                label = name.replace('_', ' ')
             if _show_component(model):
-                ax.plot(self.wave, model, color=color, lw=1.4, label=label, zorder=5, rasterized=True)
+                draw_label = label
+                if is_bal_component and bal_legend_drawn:
+                    draw_label = None
+                ax.plot(self.wave, model, color=color, lw=1.4, label=draw_label, zorder=5, rasterized=True)
+                if is_bal_component and draw_label is not None:
+                    bal_legend_drawn = True
             else:
                 ax.plot(self.wave, model, color=color, lw=1.4, zorder=5, rasterized=True)
         if len(line_plot) == len(self.wave):

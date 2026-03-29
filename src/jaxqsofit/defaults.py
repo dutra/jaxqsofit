@@ -311,6 +311,7 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
             evaluate=negative_gaussian_bal_component,
         )
 
+    # Trump et al. (2006)
     return (
         _bal_component("bal_nv", depth_frac=0.04, center=1200.0, scale=70.0, low=1120.0, high=1240.0, sigma=22.0),
         # _bal_component("bal_nv_2", depth_frac=0.025, center=1160.0, scale=90.0, low=1100.0, high=1240.0, sigma=40.0),
@@ -320,6 +321,10 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
         # _bal_component("bal_civ_2", depth_frac=0.03, center=1450.0, scale=100.0, low=1350.0, high=1549.0, sigma=45.0),
         _bal_component("bal_ciii", depth_frac=0.03, center=1850.0, scale=80.0, low=1750.0, high=1909.0, sigma=30.0),
         # _bal_component("bal_ciii_2", depth_frac=0.02, center=1800.0, scale=100.0, low=1700.0, high=1909.0, sigma=50.0),
+        # Fe ??
+        _bal_component("bal_fe1", depth_frac=0.03, center=2000.0, scale=80.0, low=1950.0, high=2050.0, sigma=30.0),
+        _bal_component("bal_fe2", depth_frac=0.03, center=2200.0, scale=80.0, low=2150.0, high=2250.0, sigma=30.0),
+        #
         _bal_component("bal_mgii", depth_frac=0.03, center=2798.0, scale=120.0, low=2750.0, high=2798.0, sigma=40.0),
         # _bal_component("bal_mgii_2", depth_frac=0.02, center=2760.0, scale=120.0, low=2700.0, high=2798.0, sigma=55.0),
     )

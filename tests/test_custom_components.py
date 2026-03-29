@@ -251,6 +251,6 @@ def test_plot_fig_negative_custom_component_sets_negative_ylim():
     fig = plt.gcf()
     ax = fig.axes[0]
     labels = [line.get_label() for line in ax.get_lines()]
-    assert "bal civ" in labels
+    assert "BAL" in labels
     assert ax.get_ylim()[0] < -0.7
     plt.close(fig)
