@@ -10,6 +10,15 @@ import jax.numpy as jnp
 import numpy as np
 
 
+def _normalize_template_flux(flux: np.ndarray, target_amp: float = 1.0) -> np.ndarray:
+    """Rescale a template so its robust peak amplitude is O(target_amp)."""
+    f = np.asarray(flux, dtype=float)
+    robust = np.nanpercentile(np.abs(f), 99)
+    if not np.isfinite(robust) or robust <= 0:
+        robust = 1.0
+    return f * (target_amp / robust)
+
+
 def _sanitize_component_name(name: str) -> str:
     """Return a stable ASCII-safe identifier for a custom component."""
     text = re.sub(r"[^0-9a-zA-Z_]+", "_", str(name).strip())

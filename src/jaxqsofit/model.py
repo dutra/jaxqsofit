@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import extinction
-from astropy.cosmology import FlatLambdaCDM
 
 import jax
 import jax.numpy as jnp
@@ -27,7 +26,8 @@ warnings.filterwarnings("ignore")
 
 C_KMS = 299792.458
 _SFD_QUERY_CACHE: Dict[str, Any] = {}
-_LUMINOSITY_COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
+_LUMINOSITY_H0 = 70.0
+_LUMINOSITY_OM0 = 0.3
 MPC_TO_CM = 3.085677581491367e24
 
 
@@ -72,37 +72,31 @@ def _resolve_pl_pivot(wave, prior_config):
 @lru_cache(maxsize=256)
 def _luminosity_distance_cm(z: float) -> float:
     """Return luminosity distance in cm for a fixed flat LCDM cosmology."""
-    return float(_LUMINOSITY_COSMO.luminosity_distance(float(z)).to("cm").value)
+    z = float(z)
+    grid = np.linspace(0.0, max(z, 1.0e-8), 256, dtype=float)
+    ez_inv = 1.0 / np.sqrt(np.maximum(_LUMINOSITY_OM0 * (1.0 + grid) ** 3 + (1.0 - _LUMINOSITY_OM0), 1.0e-18))
+    dc_mpc = (C_KMS / _LUMINOSITY_H0) * np.trapezoid(ez_inv, x=grid)
+    return float(dc_mpc * (1.0 + z) * MPC_TO_CM)
 
 
-@lru_cache(maxsize=1)
-def _get_jax_cosmo_backend():
-    """Return cached jax_cosmo helpers for a flat LCDM luminosity distance."""
-    import jax_cosmo.background as bg
-    from jax_cosmo.core import Cosmology
-
-    cosmo = Cosmology(
-        Omega_c=0.25,
-        Omega_b=0.05,
-        h=0.70,
-        n_s=0.96,
-        sigma8=0.8,
-        Omega_k=0.0,
-        w0=-1.0,
-        wa=0.0,
-    )
-    return bg, cosmo
+def _ez_inv_flat_lcdm_jax(z):
+    """Inverse expansion rate for the fixed flat LCDM helper cosmology."""
+    z = jnp.asarray(z, dtype=jnp.float64)
+    ez2 = _LUMINOSITY_OM0 * (1.0 + z) ** 3 + (1.0 - _LUMINOSITY_OM0)
+    return jax.lax.rsqrt(jnp.maximum(ez2, 1.0e-18))
 
 
 def _luminosity_distance_cm_jax(z):
-    """Return luminosity distance in cm using jax_cosmo when available."""
+    """Return luminosity distance in cm using a pure-JAX flat LCDM integral."""
     z = jnp.asarray(z, dtype=jnp.float64)
     scalar_input = z.ndim == 0
-    bg, cosmo = _get_jax_cosmo_backend()
-    a = 1.0 / (1.0 + z)
-    d_a_mpc_over_h = bg.angular_diameter_distance(cosmo, a)
-    d_l_mpc_over_h = d_a_mpc_over_h / jnp.maximum(a * a, 1e-30)
-    d_l_cm = d_l_mpc_over_h / cosmo.h * MPC_TO_CM
+
+    def _one_distance(zi):
+        grid = jnp.linspace(0.0, jnp.maximum(zi, 1.0e-8), 256)
+        dc_mpc = (C_KMS / _LUMINOSITY_H0) * jnp.trapezoid(_ez_inv_flat_lcdm_jax(grid), x=grid)
+        return dc_mpc * (1.0 + zi) * MPC_TO_CM
+
+    d_l_cm = _one_distance(z) if scalar_input else jax.vmap(_one_distance)(z)
     return jnp.reshape(d_l_cm, ()) if scalar_input else d_l_cm
 
 
