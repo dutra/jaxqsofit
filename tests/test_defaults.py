@@ -111,6 +111,7 @@ def test_default_line_table_contains_expanded_uv_complexes():
         "NV1240",
     }
     assert expected_names.issubset(by_name)
-    assert "CIII_br" not in by_name
+    assert "CIII_br" in by_name
+    assert by_name["CIII_br"]["ngauss"] == 2
     assert by_name["CIV_br"]["ngauss"] == 3
     assert by_name["Lya_br"]["ngauss"] == 3
