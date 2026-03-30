@@ -125,23 +125,14 @@ def test_qso_fsps_joint_model_reports_log_lambda_llambda_2500_agn():
     assert np.isfinite(float(tr["log_lambda_Llambda_2500_agn"]["value"]))
 
 
-def test_luminosity_distance_cm_jax_is_finite_and_vectorizable(monkeypatch):
-    class _BG:
-        @staticmethod
-        def angular_diameter_distance(cosmo, a):
-            return 1000.0 * a
-
-    class _Cosmo:
-        h = 0.7
-
-    monkeypatch.setattr("jaxqsofit.model._get_jax_cosmo_backend", lambda: (_BG(), _Cosmo()))
-
+def test_luminosity_distance_cm_jax_is_finite_and_vectorizable():
     z = jnp.asarray([0.1, 1.0, 2.0])
     d_l = _luminosity_distance_cm_jax(z)
 
     assert d_l.shape == (3,)
     assert np.all(np.isfinite(np.asarray(d_l)))
     assert np.all(np.asarray(d_l) > 0.0)
+    assert np.all(np.diff(np.asarray(d_l)) > 0.0)
 
 
 def test_qso_fsps_joint_model_custom_component_returns_jax_array():
