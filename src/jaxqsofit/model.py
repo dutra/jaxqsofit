@@ -69,6 +69,37 @@ def _resolve_pl_pivot(wave, prior_config):
     return _spectrum_center_pivot(wave)
 
 
+def _format_wave_label(w0):
+    """Format a continuum wavelength for deterministic site naming."""
+    try:
+        wave = float(w0)
+    except Exception:
+        return str(w0)
+    if np.isfinite(wave) and abs(wave - round(wave)) < 1e-6:
+        return str(int(round(wave)))
+    return str(wave).replace(".", "p")
+
+
+def _continuum_output_waves_from_prior_config(prior_config, *, default_waves=(2500.0, 4200.0, 5100.0)):
+    """Return unique continuum output wavelengths, always preserving 2500 A."""
+    out_params = prior_config.get("out_params", {}) if isinstance(prior_config, dict) else {}
+    waves = np.asarray(out_params.get("cont_loc", []), dtype=float)
+    waves = waves[np.isfinite(waves)]
+    if waves.size == 0:
+        waves = np.asarray(default_waves, dtype=float)
+    waves = np.concatenate([waves, np.asarray([2500.0], dtype=float)])
+
+    out = []
+    for wave in waves:
+        wave = float(wave)
+        if not np.isfinite(wave):
+            continue
+        if any(abs(wave - prev) < 1e-6 for prev in out):
+            continue
+        out.append(wave)
+    return tuple(out)
+
+
 @lru_cache(maxsize=256)
 def _luminosity_distance_cm(z: float) -> float:
     """Return luminosity distance in cm for a fixed flat LCDM cosmology."""
@@ -943,27 +974,29 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         custom_total_model = custom_total_model * poly_model
     agn_model = pl_model + fe_uv_model + fe_op_model + bc_model + custom_total_model
 
-    if fit_pl:
-        pl_flux_2500 = _powerlaw_jax(
-            jnp.asarray(2500.0),
-            pl_norm=pl_norm,
-            pl_slope=pl_slope,
-            pivot=pl_pivot,
-        )
-        if fit_reddening:
-            pl_flux_2500 = pl_flux_2500 * _smc_like_reddening_jax(
-                jnp.asarray(2500.0),
-                reddening_ebv,
-                uv_ref=float(prior_config.get('reddening_uv_ref', 2500.0)),
-                alpha=float(prior_config.get('reddening_alpha', 1.2)),
+    log_lambda_llambda_agn = {}
+    for wave_lum in _continuum_output_waves_from_prior_config(prior_config):
+        if fit_pl:
+            pl_flux_lum = _powerlaw_jax(
+                jnp.asarray(wave_lum),
+                pl_norm=pl_norm,
+                pl_slope=pl_slope,
+                pivot=pl_pivot,
             )
-        log_lambda_llambda_2500_agn = _rest_log_lambda_llambda_from_flam(
-            2500.0,
-            pl_flux_2500,
-            z_qso,
-        )
-    else:
-        log_lambda_llambda_2500_agn = jnp.asarray(jnp.nan)
+            if fit_reddening:
+                pl_flux_lum = pl_flux_lum * _smc_like_reddening_jax(
+                    jnp.asarray(wave_lum),
+                    reddening_ebv,
+                    uv_ref=float(prior_config.get('reddening_uv_ref', 2500.0)),
+                    alpha=float(prior_config.get('reddening_alpha', 1.2)),
+                )
+            log_lambda_llambda_agn[wave_lum] = _rest_log_lambda_llambda_from_flam(
+                wave_lum,
+                pl_flux_lum,
+                z_qso,
+            )
+        else:
+            log_lambda_llambda_agn[wave_lum] = jnp.asarray(jnp.nan)
     ntemp = fsps_grid.templates.shape[1]
     if decompose_host:
         tau_host = numpyro.sample('tau_host', dist.HalfNormal(_cfg_halfnorm('tau_host')))
@@ -1142,7 +1175,12 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     numpyro.deterministic('line_model_psf', line_model_psf)
     numpyro.deterministic('psf_model', psf_model)
     numpyro.deterministic('frac_host', frac_host)
-    numpyro.deterministic('log_lambda_Llambda_2500_agn', log_lambda_llambda_2500_agn)
+    for wave_lum, log_lambda_llambda_lum in log_lambda_llambda_agn.items():
+        wave_label = _format_wave_label(wave_lum)
+        numpyro.deterministic(
+            f'log_lambda_Llambda_{wave_label}_agn',
+            log_lambda_llambda_lum,
+        )
     numpyro.deterministic('fsps_weights', fsps_weights)
     numpyro.deterministic('fsps_weights_frac', fsps_weights_frac)
 

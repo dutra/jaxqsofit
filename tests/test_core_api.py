@@ -45,6 +45,20 @@ def test_init_psf_defaults_band_labels():
     assert q.psf_bands == ["u", "g", "r"]
 
 
+def test_predictive_return_sites_include_requested_continuum_luminosities():
+    lam, flux, err = _make_simple_spectrum()
+    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q._fit_prior_config = build_default_prior_config(flux)
+    q.L_conti_wave = np.array([1350.0, 3000.0, 5100.0], dtype=float)
+
+    sites = q._predictive_return_sites()
+
+    assert "log_lambda_Llambda_1350_agn" in sites
+    assert "log_lambda_Llambda_2500_agn" in sites
+    assert "log_lambda_Llambda_3000_agn" in sites
+    assert "log_lambda_Llambda_5100_agn" in sites
+
+
 def test_prepare_psf_photometry_masks_invalid_and_builds_transmissions():
     lam, flux, err = _make_wide_spectrum()
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)

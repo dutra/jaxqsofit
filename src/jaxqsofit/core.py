@@ -33,6 +33,7 @@ from .custom_components import (
 from .defaults import build_default_bal_components, build_default_prior_config
 from .model import (
     C_KMS,
+    _continuum_output_waves_from_prior_config,
     _extract_line_table_from_prior_config,
     _get_sfd_query,
     _normalize_template_flux,
@@ -187,8 +188,7 @@ class QSOFit:
             return f"ra{ra_f:.5f}_dec{dec_f:.5f}"
         return "result"
 
-    @staticmethod
-    def _predictive_return_sites(custom_components=None, custom_line_components=None):
+    def _predictive_return_sites(self, custom_components=None, custom_line_components=None):
         """Return posterior predictive sites needed for summaries and plots."""
         return_sites = [
             'f_pl_model',
@@ -217,6 +217,11 @@ class QSOFit:
             'line_model_psf',
             'psf_model',
         ]
+        for wave_lum in _continuum_output_waves_from_prior_config(
+            getattr(self, "_fit_prior_config", None)
+        ):
+            wave_label = self._format_wave_label(wave_lum)
+            return_sites.append(f"log_lambda_Llambda_{wave_label}_agn")
         return_sites += custom_component_site_names(custom_components)
         return_sites += custom_line_component_site_names(custom_line_components)
         return return_sites
@@ -1820,12 +1825,6 @@ class QSOFit:
         self.eta_psf = float(np.nanmedian(eta_psf_draws)) if eta_psf_draws.size > 0 else np.nan
         self.eta_psf_err = float(np.nanstd(eta_psf_draws)) if eta_psf_draws.size > 0 else np.nan
         self.scale_psf = 10.0 ** (-0.4 * self.delta_m_psf) if np.isfinite(self.delta_m_psf) else np.nan
-        if 'log_lambda_Llambda_2500_agn' in pred_out:
-            log_l2500_draws = np.asarray(pred_out['log_lambda_Llambda_2500_agn'], dtype=float)
-        else:
-            log_l2500_draws = np.array([np.nan], dtype=float)
-        self.log_lambda_Llambda_2500_agn = float(np.nanmedian(log_l2500_draws)) if log_l2500_draws.size > 0 else np.nan
-        self.log_lambda_Llambda_2500_agn_err = float(np.nanstd(log_l2500_draws)) if log_l2500_draws.size > 0 else np.nan
         if 'host_redshift_prior_weight' in pred_out:
             host_prior_weight_draws = np.asarray(pred_out['host_redshift_prior_weight'], dtype=float)
         else:
@@ -1906,33 +1905,53 @@ class QSOFit:
         age_weighted = float(np.sum(self.fsps_weights_median * ages) / wsum) if wsum > 0 else -1.0
         metal_weighted = float(np.sum(self.fsps_weights_median * mets) / wsum) if wsum > 0 else -99.0
 
-        cont_waves = np.asarray(getattr(self, 'L_conti_wave', []), dtype=float)
-        cont_waves = cont_waves[np.isfinite(cont_waves)]
-        if cont_waves.size == 0:
-            cont_waves = np.asarray([2500.0, 4200.0, 5100.0], dtype=float)
+        cont_waves = np.asarray(
+            _continuum_output_waves_from_prior_config(
+                getattr(self, "_fit_prior_config", None)
+            ),
+            dtype=float,
+        )
         self.L_conti_wave = cont_waves
         pivot_wave = float(np.asarray(_spectrum_center_pivot(self.wave), dtype=float))
 
         frac_host_vals = []
         frac_host_psf_vals = []
         frac_bc_vals = []
+        log_lambda_llambda_vals = []
+        log_lambda_llambda_errs = []
         frac_host_names = []
         frac_host_psf_names = []
         frac_bc_names = []
+        log_lambda_llambda_names = []
+        log_lambda_llambda_err_names = []
         for w0 in cont_waves:
             wave_label = self._format_wave_label(w0)
             frac_host = self._host_fraction_at_wave(w0)
             frac_host_psf = self._host_fraction_psf_at_wave(w0)
             frac_bc = self._bc_fraction_at_wave(w0)
+            lum_key = f'log_lambda_Llambda_{wave_label}_agn'
+            lum_draws = (
+                np.asarray(pred_out[lum_key], dtype=float)
+                if lum_key in pred_out
+                else np.array([np.nan], dtype=float)
+            )
+            log_lambda_llambda = float(np.nanmedian(lum_draws)) if lum_draws.size > 0 else np.nan
+            log_lambda_llambda_err = float(np.nanstd(lum_draws)) if lum_draws.size > 0 else np.nan
             setattr(self, f'frac_host_{wave_label}', frac_host)
             setattr(self, f'frac_host_psf_{wave_label}', frac_host_psf)
             setattr(self, f'frac_bc_{wave_label}', frac_bc)
+            setattr(self, lum_key, log_lambda_llambda)
+            setattr(self, f'{lum_key}_err', log_lambda_llambda_err)
             frac_host_vals.append(frac_host)
             frac_host_psf_vals.append(frac_host_psf)
             frac_bc_vals.append(frac_bc)
+            log_lambda_llambda_vals.append(log_lambda_llambda)
+            log_lambda_llambda_errs.append(log_lambda_llambda_err)
             frac_host_names.append(f'frac_host_{wave_label}')
             frac_host_psf_names.append(f'frac_host_psf_{wave_label}')
             frac_bc_names.append(f'frac_bc_{wave_label}')
+            log_lambda_llambda_names.append(lum_key)
+            log_lambda_llambda_err_names.append(f'{lum_key}_err')
 
         # Preserve the legacy fixed-wavelength attributes for downstream compatibility.
         self.pivot_wave = pivot_wave
@@ -1989,10 +2008,16 @@ class QSOFit:
         conti_entries += [(name, value, 'float') for name, value in zip(frac_host_psf_names, frac_host_psf_vals)]
         conti_entries += [(name, value, 'float') for name, value in zip(frac_bc_names, frac_bc_vals)]
         conti_entries += [
+            (name, value, 'float')
+            for name, value in zip(log_lambda_llambda_names, log_lambda_llambda_vals)
+        ]
+        conti_entries += [
+            (name, value, 'float')
+            for name, value in zip(log_lambda_llambda_err_names, log_lambda_llambda_errs)
+        ]
+        conti_entries += [
             ('fsps_age_weighted_gyr', age_weighted, 'float'),
             ('fsps_logzsol_weighted', metal_weighted, 'float'),
-            ('log_lambda_Llambda_2500_agn', self.log_lambda_Llambda_2500_agn, 'float'),
-            ('log_lambda_Llambda_2500_agn_err', self.log_lambda_Llambda_2500_agn_err, 'float'),
             ('host_redshift_prior_weight', self.host_redshift_prior_weight, 'float'),
             ('host_redshift_prior_weight_err', self.host_redshift_prior_weight_err, 'float'),
             ('host_redshift_prior_loc_eff', self.host_redshift_prior_loc_eff, 'float'),

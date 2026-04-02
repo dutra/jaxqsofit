@@ -78,7 +78,7 @@ def test_build_tied_line_meta_from_linelist_minimal():
     assert np.all(np.isfinite(meta['line_lambda']))
 
 
-def test_qso_fsps_joint_model_reports_log_lambda_llambda_2500_agn():
+def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_luminosities():
     wave = np.linspace(2000.0, 6000.0, 32)
     flux = np.ones_like(wave)
     err = np.full_like(wave, 0.1)
@@ -122,7 +122,10 @@ def test_qso_fsps_joint_model_reports_log_lambda_llambda_2500_agn():
         z_qso=1.0,
     )
 
-    assert np.isfinite(float(tr["log_lambda_Llambda_2500_agn"]["value"]))
+    for wave_label in ("1350", "2500", "3000", "5100"):
+        site_name = f"log_lambda_Llambda_{wave_label}_agn"
+        assert site_name in tr
+        assert np.isfinite(float(tr[site_name]["value"]))
 
 
 def test_luminosity_distance_cm_jax_is_finite_and_vectorizable():
