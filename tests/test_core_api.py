@@ -570,6 +570,41 @@ def test_plot_corner_reduces_tick_label_fontsize():
     assert all(size == 8 for size in tick_sizes)
 
 
+def test_plot_corner_uses_light_curve_full_corner_rendering(monkeypatch):
+    lam, flux, err = _make_simple_spectrum()
+    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q.numpyro_samples = {
+        "PL_slope": np.array([-1.5, -1.4, -1.6]),
+        "cont_norm": np.array([1.0, 1.1, 0.9]),
+    }
+    q.save_fig = False
+
+    called = {}
+
+    def _stub_corner(*args, **kwargs):
+        called.update(kwargs)
+        fig, _ = coremod.plt.subplots()
+        return fig
+
+    monkeypatch.setattr("corner.corner", _stub_corner)
+
+    fig = q.plot_corner(show_plot=False)
+
+    assert fig is not None
+    assert called["plot_datapoints"] is False
+    assert called["plot_contours"] is True
+    assert called["hist2d_kwargs"] == {"bins": 15, "levels": [0.393, 0.865, 0.989]}
+    assert called["fill_contours"] is False
+    assert called["no_fill_contours"] is True
+    assert called["smooth"] == 0.8
+    assert called["smooth1d"] == 0.8
+    assert called["max_n_ticks"] == 3
+    assert called["quiet"] is True
+    assert called["labelpad"] == 0.3
+    assert called["label_kwargs"] == {"fontsize": 9}
+    assert called["title_kwargs"] == {"fontsize": 9}
+
+
 def test_plot_mcmc_diagnostics_forwards_show_plot(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
