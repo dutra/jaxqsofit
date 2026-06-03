@@ -88,10 +88,10 @@ If you want GPU JAX, install `jax`/`jaxlib` following official JAX instructions 
 This code expects an HDF5 SSP file path passed as `dsps_ssp_fn`, e.g. `tempdata.h5`.
 
 ```
-curl -L -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5
+curl -L -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_continuum_fsps_v3.2_lgmet_age.h5
 ```
 
-Always set `dsps_ssp_fn="tempdata.h5"` to the HDF5 SSP template file you want to use.
+Always set `dsps_ssp_fn="tempdata.h5"` to the HDF5 SSP template file you want to use. The continuum-only DSPS template is recommended when nebular emission lines are modeled separately.
 
 ### 4. Configure dustmaps SFD (one-time)
 
