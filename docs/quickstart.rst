@@ -23,6 +23,7 @@ Minimal fitting example
        fit_fe=True,
        fit_bc=True,
        fit_poly=True,
+       dsps_ssp_fn='tempdata.h5',
        save_result=False,
        plot_fig=True,
    )
@@ -38,6 +39,7 @@ For a fast MAP-style fit, use:
        fit_method='optax',
        optax_steps=1500,
        optax_lr=1e-2,
+       dsps_ssp_fn='tempdata.h5',
        save_result=False,
        plot_fig=True,
    )
@@ -54,4 +56,5 @@ Warm-start with Optax, then run NUTS:
        optax_steps=800,
        nuts_warmup=200,
        nuts_samples=400,
+       dsps_ssp_fn='tempdata.h5',
    )

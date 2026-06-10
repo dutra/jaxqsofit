@@ -18,6 +18,8 @@ extensions = [
     'sphinx.ext.napoleon',
     'sphinx.ext.autosummary',
     'sphinx.ext.viewcode',
+    'nbsphinx',
+    'nbsphinx_link',
 ]
 
 autosummary_generate = True
@@ -43,3 +45,9 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
 html_title = 'JaxQSOFit Documentation'
+
+# Render tutorial notebooks as documentation pages. Do not execute notebooks by
+# default: several examples query remote services or run expensive samplers.
+# Set NBSPHINX_EXECUTE=always locally or in CI to pre-execute notebooks.
+nbsphinx_execute = os.environ.get('NBSPHINX_EXECUTE', 'never')
+nbsphinx_allow_errors = False
