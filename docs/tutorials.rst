@@ -1,17 +1,24 @@
 Tutorials
 =========
 
-Main tutorial notebook
-----------------------
+Notebook tutorials
+------------------
 
-- `View on GitHub <https://github.com/burke86/jaxqsofit/blob/main/notebooks/01_jaxqsofit_tutorial.ipynb>`_
-- `Download notebook <https://raw.githubusercontent.com/burke86/jaxqsofit/main/notebooks/01_jaxqsofit_tutorial.ipynb>`_
+The notebooks below are rendered into the documentation with ``nbsphinx``.
+By default, the docs build uses the outputs already saved in each notebook. To
+pre-execute notebooks during a local or CI docs build, set
+``NBSPHINX_EXECUTE=always`` before invoking Sphinx.
 
-Additional notebooks
---------------------
+.. toctree::
+   :maxdepth: 1
 
-- `Fit the Selsing composite <https://github.com/burke86/jaxqsofit/blob/main/notebooks/02_selsing_composite_fit.ipynb>`_
-- `Fit the Selsing composite with an SMC-like reddened continuum <https://github.com/burke86/jaxqsofit/blob/main/notebooks/07_selsing_smc_reddening_tutorial.ipynb>`_
+   notebooks/01_jaxqsofit_tutorial
+   notebooks/02_selsing_composite_fit
+   notebooks/03_sdss_j102839_iron
+   notebooks/04_sdss_galaxy
+   notebooks/05_sdss_psf_recalibration_tutorial
+   notebooks/06_custom_components_tutorial
+   notebooks/07_local_sdss_bal_tutorial
 
 What this tutorial covers
 -------------------------
