@@ -41,9 +41,19 @@ autodoc_mock_imports = [
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
-html_theme = 'sphinx_rtd_theme'
+html_theme = 'sphinx_book_theme'
 html_static_path = ['_static']
 html_title = 'JaxQSOFit Documentation'
+html_show_sourcelink = False
+html_theme_options = {
+    'path_to_docs': 'docs',
+    'repository_url': 'https://github.com/burke86/jaxqsofit',
+    'repository_branch': 'main',
+    'use_edit_page_button': True,
+    'use_issues_button': True,
+    'use_repository_button': True,
+    'use_download_button': True,
+}
 
 # Render tutorial notebooks as documentation pages. Do not execute notebooks by
 # default: several examples query remote services or run expensive samplers.
