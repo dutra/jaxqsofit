@@ -1054,7 +1054,12 @@ class QSOFit:
             If True, mask pixels with rest-frame wavelength below Ly-alpha
             (1215.67 Angstrom) before fitting.
         fit_method : {'nuts', 'optax', 'optax+nuts'}, optional
-            Fitting backend.
+            Fitting backend. ``'optax'`` runs staged MAP optimization with
+            Optax/Adam and stores a point estimate, but does not produce
+            posterior samples. ``'nuts'`` runs NumPyro NUTS directly and stores
+            posterior samples. ``'optax+nuts'`` first runs the staged Optax
+            warm start and then initializes NUTS from that solution; this is
+            the default and is usually the most robust posterior-fitting mode.
         verbose : bool, optional
             Verbose optimizer output where applicable.
         fsps_age_grid : sequence of float, optional
