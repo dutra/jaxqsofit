@@ -9,8 +9,8 @@ SRC = os.path.join(ROOT, 'src')
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-project = 'JaxQSOFit'
-author = 'JaxQSOFit contributors'
+project = 'JAXQSOFit'
+author = 'JAXQSOFit contributors'
 copyright = f"{datetime.now():%Y}, {author}"
 
 extensions = [
@@ -43,7 +43,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 html_theme = 'sphinx_book_theme'
 html_static_path = ['_static']
-html_title = 'JaxQSOFit Documentation'
+html_title = 'JAXQSOFit Documentation'
 html_show_sourcelink = False
 html_theme_options = {
     'path_to_docs': 'docs',

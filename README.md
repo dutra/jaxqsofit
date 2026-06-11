@@ -1,7 +1,7 @@
 # JAXQSOFit
 
 <p align="center">
-  <img src="logo.png" alt="JaxQSOFit logo" width="220">
+  <img src="logo.png" alt="JAXQSOFit logo" width="220">
 </p>
 
 Bayesian quasar spectral fitting with JAX + NumPyro, including:
