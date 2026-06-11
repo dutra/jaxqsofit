@@ -73,3 +73,28 @@ def test_evaluate_joint_spectral_components_uses_default_tied_lines():
     assert "jqf_line_model_broad" in tr
     assert "jqf_line_model_narrow" in tr
     assert np.asarray(tr["jqf_total_model"]["value"]).shape == wave_obs.shape
+
+
+def test_evaluate_joint_spectral_components_reports_fixed_narrow_line_controls():
+    wave_obs = np.linspace(4990.0, 5010.0, 96)
+    continuum = np.full_like(wave_obs, 1.0)
+
+    tr = trace(seed(evaluate_joint_spectral_components, jax.random.PRNGKey(6))).get_trace(
+        wave_obs=wave_obs,
+        redshift=0.0,
+        continuum_mjy=continuum,
+        config=SpectralComponentConfig(
+            use_lines=True,
+            use_tied_lines=False,
+            use_feii=False,
+            use_balmer_continuum=False,
+            line_centers_rest=(5000.0,),
+            line_names=("OIII5007c",),
+            fixed_narrow_fwhm_kms=321.0,
+            fixed_narrow_amp_scale=2.5,
+        ),
+    )
+
+    assert tr["jqf_line_narrow_fwhm_kms"]["value"] == 321.0
+    assert tr["jqf_line_narrow_amp_scale"]["value"] == 2.5
+    assert np.nanmax(np.asarray(tr["jqf_line_model_narrow"]["value"])) > 0.0

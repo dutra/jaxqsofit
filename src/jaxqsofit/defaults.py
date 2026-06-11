@@ -10,6 +10,7 @@ from .model import negative_gaussian_bal_component
 
 MINSCA_DEFAULT = 0.0
 MAXSCA_DEFAULT = 1e10
+AMPLITUDE_FLOOR = 1e-32
 
 inisig_broad = 5e-3
 minsig_broad = 0.004
@@ -218,7 +219,7 @@ def _apply_robust_line_scale_priors(
         return line_rows
 
     # Keep dynamic range positive even for nearly flat/noisy spectra.
-    delta = max(float(fmax - fscale), 0.1 * float(fscale), 1e-8)
+    delta = max(float(fmax - fscale), 0.1 * float(fscale), AMPLITUDE_FLOOR)
 
     for row in line_rows:
         linename = str(row.get("linename", "")).lower()
@@ -236,7 +237,7 @@ def _apply_robust_line_scale_priors(
         maxsca = min(maxsca, max_cap)
 
         # Keep scales strictly positive and ordered.
-        mins_floor = max(minsca, 1e-4 * float(fscale), 1e-12)
+        mins_floor = max(minsca, 1e-4 * float(fscale), AMPLITUDE_FLOOR)
         maxsca = max(maxsca, 1.01 * mins_floor)
         inisca = float(np.clip(inisca, mins_floor, maxsca))
 
@@ -369,8 +370,8 @@ def build_default_prior_config(
         fmax = fscale
 
     cfg: Dict[str, Any] = {
-        "log_cont_norm": {"dist": "LogNormal", "loc": np.log(max(fscale, 1e-8)), "scale": 0.3},
-        "PL_norm": {"dist": "HalfNormal", "scale": max(0.5 * fscale, 1e-10)},
+        "log_cont_norm": {"dist": "LogNormal", "loc": np.log(max(fscale, AMPLITUDE_FLOOR)), "scale": 0.3},
+        "PL_norm": {"dist": "HalfNormal", "scale": max(0.5 * fscale, AMPLITUDE_FLOOR)},
         "PL_slope": {"dist": "Normal", "loc": -1.5, "scale": 0.4},
         "PL_pivot": None if pl_pivot is None else float(pl_pivot),
         "reddening_ebv": {"dist": "HalfNormal", "scale": 0.3},
@@ -392,13 +393,13 @@ def build_default_prior_config(
         "raw_w": {"dist": "Normal", "loc": -0.5, "scale": 1.0},
         "gal_v_kms": {"dist": "Normal", "loc": 0.0, "scale": 120.0},
         "gal_sigma_kms": {"dist": "HalfNormal", "scale": 200.0},
-        "log_Fe_uv_norm": {"dist": "LogNormal", "loc": np.log(max(1e-3 * fscale, 1e-10)), "scale": 0.5},
+        "log_Fe_uv_norm": {"dist": "LogNormal", "loc": np.log(max(1e-3 * fscale, AMPLITUDE_FLOOR)), "scale": 0.5},
         "log_Fe_op_over_uv": {"dist": "Normal", "loc": 0.0, "scale": 0.05},
         "log_Fe_uv_FWHM": {"dist": "LogNormal", "loc": np.log(3000.0), "scale": 0.3},
         "log_Fe_op_FWHM": {"dist": "LogNormal", "loc": np.log(3000.0), "scale": 0.3},
         "Fe_uv_shift": {"dist": "Normal", "loc": 0.0, "scale": 1e-3},
         "Fe_op_shift": {"dist": "Normal", "loc": 0.0, "scale": 1e-3},
-        "log_Balmer_norm": {"dist": "LogNormal", "loc": np.log(max(1e-3 * fscale, 1e-10)), "scale": 0.5},
+        "log_Balmer_norm": {"dist": "LogNormal", "loc": np.log(max(1e-3 * fscale, AMPLITUDE_FLOOR)), "scale": 0.5},
         "log_Balmer_Tau": {"dist": "LogNormal", "loc": np.log(0.5), "scale": 0.25},
         "log_Balmer_vel": {"dist": "LogNormal", "loc": np.log(3000.0), "scale": 0.25},
         "poly_c1": {"dist": "Normal", "loc": 0.0, "scale": 0.1},

@@ -29,6 +29,7 @@ _SFD_QUERY_CACHE: Dict[str, Any] = {}
 _LUMINOSITY_H0 = 70.0
 _LUMINOSITY_OM0 = 0.3
 MPC_TO_CM = 3.085677581491367e24
+AMPLITUDE_FLOOR = 1e-32
 
 
 def unred(wave, flux, ebv, R_V=3.1):
@@ -1117,16 +1118,25 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         amp_group = numpyro.sample(
             'line_amp_group',
             dist.TruncatedNormal(
-                loc=jnp.clip(_line_meta_array(tied_line_meta, 'amp_init_group', jax_key='amp_init_group_jax'), 1e-10),
+                loc=jnp.clip(
+                    _line_meta_array(tied_line_meta, 'amp_init_group', jax_key='amp_init_group_jax'),
+                    AMPLITUDE_FLOOR,
+                ),
                 scale=jnp.maximum(
                     amp_scale_mult * (
                         _line_meta_array(tied_line_meta, 'amp_max_group', jax_key='amp_max_group_jax')
                         - _line_meta_array(tied_line_meta, 'amp_min_group', jax_key='amp_min_group_jax')
                     ),
-                    1e-10,
+                    AMPLITUDE_FLOOR,
                 ),
-                low=jnp.clip(_line_meta_array(tied_line_meta, 'amp_min_group', jax_key='amp_min_group_jax'), 1e-10),
-                high=jnp.clip(_line_meta_array(tied_line_meta, 'amp_max_group', jax_key='amp_max_group_jax'), 1e-10),
+                low=jnp.clip(
+                    _line_meta_array(tied_line_meta, 'amp_min_group', jax_key='amp_min_group_jax'),
+                    AMPLITUDE_FLOOR,
+                ),
+                high=jnp.clip(
+                    _line_meta_array(tied_line_meta, 'amp_max_group', jax_key='amp_max_group_jax'),
+                    AMPLITUDE_FLOOR,
+                ),
             )
         ) if n_f > 0 else jnp.zeros((0,))
 
