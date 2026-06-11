@@ -472,19 +472,23 @@ def reconstruct_posterior_components(
     custom_components: Sequence[CustomComponentSpec] | None = None,
     n_draws: int | None = None,
     return_components: bool = True,
+    decompose_host: bool = True,
 ) -> Dict[str, Any]:
     """Rebuild posterior continuum components on an arbitrary rest-frame grid."""
     wave_out = np.asarray(wave_out, dtype=float)
     if wave_out.ndim != 1 or wave_out.size < 2 or not np.all(np.isfinite(wave_out)):
         raise ValueError("wave_out must be a finite 1D wavelength grid.")
 
-    fsps_grid = build_fsps_template_grid(
-        wave_out=wave_out,
-        age_grid_gyr=age_grid_gyr,
-        logzsol_grid=logzsol_grid,
-        dsps_ssp_fn=dsps_ssp_fn,
-    )
-    templates = np.asarray(fsps_grid.templates, dtype=float)
+    if decompose_host:
+        fsps_grid = build_fsps_template_grid(
+            wave_out=wave_out,
+            age_grid_gyr=age_grid_gyr,
+            logzsol_grid=logzsol_grid,
+            dsps_ssp_fn=dsps_ssp_fn,
+        )
+        templates = np.asarray(fsps_grid.templates, dtype=float)
+    else:
+        templates = np.zeros((wave_out.size, 1), dtype=float)
     lnwave = np.log(wave_out)
     custom_components = normalize_custom_components(custom_components)
 
@@ -506,6 +510,14 @@ def reconstruct_posterior_components(
         fsps_weights = np.asarray(pred_out['fsps_weights'], dtype=float)[sl]
     else:
         fsps_weights = np.zeros((n_use, templates.shape[1]), dtype=float)
+    if fsps_weights.ndim == 1:
+        fsps_weights = fsps_weights[:, np.newaxis]
+    if fsps_weights.ndim != 2 or fsps_weights.shape[1] != templates.shape[1]:
+        raise RuntimeError(
+            "Posterior fsps_weights shape is incompatible with the reconstruction "
+            f"template grid: got weights shape {fsps_weights.shape}, expected "
+            f"second dimension {templates.shape[1]} for decompose_host={bool(decompose_host)}."
+        )
 
     fe_uv_norm = np.asarray(samples.get('Fe_uv_norm', np.zeros(n_total)), dtype=float)[sl]
     log_fe_op_over_uv = np.asarray(samples.get('log_Fe_op_over_uv', np.zeros(n_total)), dtype=float)[sl]

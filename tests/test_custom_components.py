@@ -100,6 +100,45 @@ def test_reconstruct_posterior_components_includes_custom_draws(monkeypatch):
     assert np.allclose(out["draws"]["continuum"], expected)
 
 
+def test_reconstruct_posterior_components_host_disabled_uses_dummy_grid(monkeypatch):
+    def _boom(**kwargs):
+        raise AssertionError("FSPS templates should not be loaded when decompose_host=False")
+
+    monkeypatch.setattr(modelmod, "build_fsps_template_grid", _boom)
+
+    wave_out = np.linspace(2000.0, 3000.0, 5)
+    samples = {
+        "cont_norm": np.array([1.0, 1.1]),
+        "log_frac_host": np.array([0.0, 0.1]),
+        "PL_norm": np.array([1.0, 1.0]),
+        "PL_slope": np.array([0.0, 0.0]),
+    }
+    pred_out = {"fsps_weights": np.ones((2, 1))}
+
+    out = modelmod.reconstruct_posterior_components(
+        wave_out=wave_out,
+        samples=samples,
+        pred_out=pred_out,
+        age_grid_gyr=(0.1, 1.0),
+        logzsol_grid=(-0.5, 0.0),
+        dsps_ssp_fn="fake.h5",
+        prior_config={},
+        fit_poly=False,
+        fit_reddening=False,
+        fit_poly_order=0,
+        fe_uv_wave=np.array([2000.0, 3000.0]),
+        fe_uv_flux=np.zeros(2),
+        fe_op_wave=np.array([2000.0, 3000.0]),
+        fe_op_flux=np.zeros(2),
+        custom_components=(),
+        n_draws=2,
+        return_components=True,
+        decompose_host=False,
+    )
+
+    assert np.allclose(out["draws"]["host"], 0.0)
+
+
 def test_reconstruct_posterior_spectrum_passes_custom_components(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
