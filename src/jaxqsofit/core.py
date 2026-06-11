@@ -2413,6 +2413,7 @@ class QSOFit:
             custom_components=getattr(self, '_fit_custom_components', ()),
             n_draws=n_draws,
             return_components=return_components,
+            decompose_host=bool(getattr(self, '_fit_decompose_host', True)),
         )
 
     def component_fraction_at_wave(self, component='host', wave0=2500.0, reference='continuum', reconstruct=False, n_draws=None):

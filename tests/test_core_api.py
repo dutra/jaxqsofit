@@ -770,6 +770,7 @@ def test_reconstruct_posterior_spectrum_delegates_to_model_helper(monkeypatch):
     q._fit_fit_poly = True
     q._fit_fit_poly_order = 3
     q._fit_fit_reddening = False
+    q._fit_decompose_host = False
     q._posterior_hydrated = True
 
     captured = {}
@@ -795,6 +796,7 @@ def test_reconstruct_posterior_spectrum_delegates_to_model_helper(monkeypatch):
     assert captured["fit_poly"] is True
     assert captured["fit_poly_order"] == 3
     assert captured["fit_reddening"] is False
+    assert captured["decompose_host"] is False
     assert captured["n_draws"] == 2
     assert captured["return_components"] is False
     assert np.isclose(np.min(captured["wave_out"]), 2500.0)
