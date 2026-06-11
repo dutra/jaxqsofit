@@ -40,6 +40,8 @@ class SpectralComponentConfig:
     line_amp_prior_sigma: float = 2.0
     broad_fwhm_kms_default: float = 3000.0
     narrow_fwhm_kms_default: float = 500.0
+    fixed_narrow_fwhm_kms: Any | None = None
+    fixed_narrow_amp_scale: Any | None = None
     line_velocity_sigma_kms: float = 500.0
     feii_fwhm_kms_default: float = 3000.0
     balmer_velocity_kms_default: float = 3000.0
@@ -138,6 +140,25 @@ def _evaluate_tied_line_components(wave_rest, cfg: SpectralComponentConfig, *, s
     mus = jnp.asarray(tied_line_meta["ln_lambda0"], dtype=jnp.float64) + dmu
 
     broad_mask = jnp.asarray(_broad_line_mask(tied_line_meta.get("names", [])), dtype=jnp.float64)
+    if cfg.fixed_narrow_fwhm_kms is not None:
+        fixed_narrow_sig = jnp.maximum(
+            jnp.asarray(cfg.fixed_narrow_fwhm_kms, dtype=jnp.float64),
+            1.0,
+        ) / (299792.458 * 2.354820045)
+        sigs = jnp.where(broad_mask > 0.0, sigs, fixed_narrow_sig)
+    narrow_amp_scale = (
+        jnp.maximum(jnp.asarray(cfg.fixed_narrow_amp_scale, dtype=jnp.float64), 1.0e-12)
+        if cfg.fixed_narrow_amp_scale is not None
+        else jnp.asarray(1.0, dtype=jnp.float64)
+    )
+    amps = amps * (broad_mask + (1.0 - broad_mask) * narrow_amp_scale)
+    narrow_weights = jnp.clip(amps * (1.0 - broad_mask), 0.0, None)
+    narrow_weight_sum = jnp.sum(narrow_weights)
+    narrow_fwhm_kms = jnp.where(
+        narrow_weight_sum > 0.0,
+        299792.458 * 2.354820045 * jnp.sum(sigs * narrow_weights) / jnp.maximum(narrow_weight_sum, 1.0e-30),
+        jnp.asarray(float(cfg.narrow_fwhm_kms_default), dtype=jnp.float64),
+    )
     lnwave = jnp.log(wave_rest)
     broad = _many_gauss_lnlam(lnwave, amps * broad_mask, mus, sigs)
     narrow = _many_gauss_lnlam(lnwave, amps * (1.0 - broad_mask), mus, sigs)
@@ -146,6 +167,8 @@ def _evaluate_tied_line_components(wave_rest, cfg: SpectralComponentConfig, *, s
         "line_amp_per_component": amps,
         "line_mu_per_component": mus,
         "line_sig_per_component": sigs,
+        "line_narrow_fwhm_kms": narrow_fwhm_kms,
+        "line_narrow_amp_scale": narrow_amp_scale,
     }
     return total, broad, narrow, diagnostics
 
@@ -156,7 +179,7 @@ def _evaluate_simple_line_components(wave_rest, continuum_model, cfg: SpectralCo
     broad_model = jnp.zeros_like(wave_rest)
     narrow_model = jnp.zeros_like(wave_rest)
     if not cfg.line_centers_rest:
-        return line_model, broad_model, narrow_model
+        return line_model, broad_model, narrow_model, {}
     line_names = cfg.line_names or tuple(f"line_{i}" for i, _ in enumerate(cfg.line_centers_rest))
     broad_names = {str(name) for name in cfg.broad_line_names}
     cont_scale = jnp.maximum(jnp.nanmedian(jnp.abs(continuum_model)), 1.0e-8)
@@ -171,6 +194,10 @@ def _evaluate_simple_line_components(wave_rest, continuum_model, cfg: SpectralCo
             f"{site_prefix}_line_fwhm_{name}",
             dist.LogNormal(jnp.log(max(default_fwhm, 1.0)), 0.5),
         )
+        if (not is_broad) and cfg.fixed_narrow_fwhm_kms is not None:
+            fwhm = jnp.maximum(jnp.asarray(cfg.fixed_narrow_fwhm_kms, dtype=jnp.float64), 1.0)
+        if (not is_broad) and cfg.fixed_narrow_amp_scale is not None:
+            amp = amp * jnp.maximum(jnp.asarray(cfg.fixed_narrow_amp_scale, dtype=jnp.float64), 1.0e-12)
         velocity = numpyro.sample(
             f"{site_prefix}_line_velocity_{name}",
             dist.Normal(0.0, max(cfg.line_velocity_sigma_kms, 1.0)),
@@ -181,7 +208,18 @@ def _evaluate_simple_line_components(wave_rest, continuum_model, cfg: SpectralCo
         line_model = line_model + component
         broad_model = broad_model + jnp.where(is_broad, component, 0.0)
         narrow_model = narrow_model + jnp.where(is_broad, 0.0, component)
-    return line_model, broad_model, narrow_model
+    return line_model, broad_model, narrow_model, {
+        "line_narrow_fwhm_kms": (
+            jnp.maximum(jnp.asarray(cfg.fixed_narrow_fwhm_kms, dtype=jnp.float64), 1.0)
+            if cfg.fixed_narrow_fwhm_kms is not None
+            else jnp.asarray(float(cfg.narrow_fwhm_kms_default), dtype=jnp.float64)
+        ),
+        "line_narrow_amp_scale": (
+            jnp.maximum(jnp.asarray(cfg.fixed_narrow_amp_scale, dtype=jnp.float64), 1.0e-12)
+            if cfg.fixed_narrow_amp_scale is not None
+            else jnp.asarray(1.0, dtype=jnp.float64)
+        ),
+    }
 
 
 def evaluate_joint_spectral_components(
@@ -238,7 +276,7 @@ def evaluate_joint_spectral_components(
                 site_prefix=site_prefix,
             )
         else:
-            line_model, line_broad_model, line_narrow_model = _evaluate_simple_line_components(
+            line_model, line_broad_model, line_narrow_model, line_diagnostics = _evaluate_simple_line_components(
                 wave_rest,
                 continuum_model,
                 cfg,
