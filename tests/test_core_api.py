@@ -46,6 +46,7 @@ def _build_bundle_source(tmp_path, filename, decompose_host):
     q.fe_op_wave = np.array([3500.0, 7000.0])
     q.fe_op_flux = np.array([0.0, 0.0])
     q._fit_prior_config = build_default_prior_config(flux)
+    q._fit_prior_config["host_sfh_model"] = "flexible"
     q._fit_fsps_age_grid = (0.1, 1.0)
     q._fit_fsps_logzsol_grid = (-0.5, 0.0)
     q._fit_dsps_ssp_fn = "fake_ssp.h5"
@@ -927,22 +928,6 @@ def test_load_from_samples_roundtrip_host_disabled_reconstructs_without_loading_
         filename="unit_test_host_disabled_recon",
         output_path=str(tmp_path),
     )
-
-    def _stub_reconstruct(**kwargs):
-        assert kwargs["pred_out"]["fsps_weights"].shape == (3, 4)
-        return {
-            "wave": np.asarray(kwargs["wave_out"]),
-            "draws": {
-                "host": np.zeros((3, len(kwargs["wave_out"]))),
-                "continuum": np.ones((3, len(kwargs["wave_out"]))),
-            },
-            "median": {
-                "host": np.zeros(len(kwargs["wave_out"])),
-                "continuum": np.ones(len(kwargs["wave_out"])),
-            },
-        }
-
-    monkeypatch.setattr(coremod, "reconstruct_posterior_components", _stub_reconstruct)
 
     recon = loaded.reconstruct_posterior_spectrum(n_draws=3)
 

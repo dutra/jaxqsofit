@@ -321,6 +321,143 @@ def _cfg_norm_from_prior_config(prior_config, key):
     return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
 
 
+def _cfg_mean_scale_from_prior_config(prior_config, key, default_loc, default_scale):
+    """Read Normal-like prior location/scale with defaults."""
+    cfg = prior_config.get(key, None)
+    if isinstance(cfg, dict):
+        return jnp.asarray(cfg.get("loc", default_loc)), jnp.asarray(cfg.get("scale", default_scale))
+    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
+        return jnp.asarray(cfg[0]), jnp.asarray(cfg[1])
+    return jnp.asarray(default_loc), jnp.asarray(default_scale)
+
+
+def _cfg_halfnormal_from_prior_config(prior_config, key, default_scale):
+    """Read HalfNormal scale with a default."""
+    cfg = prior_config.get(key, None)
+    if isinstance(cfg, dict):
+        return jnp.asarray(cfg.get("scale", default_scale))
+    if isinstance(cfg, (tuple, list)) and len(cfg) >= 1:
+        return jnp.asarray(cfg[0])
+    if cfg is not None:
+        return jnp.asarray(cfg)
+    return jnp.asarray(default_scale)
+
+
+def _sample_log_stellar_mass(prior_config):
+    """Sample host stellar mass for physical-SFH host modes."""
+    cfg = prior_config.get("log_stellar_mass", None)
+    if isinstance(cfg, dict):
+        dist_name = str(cfg.get("dist", "StudentT")).lower()
+        loc = jnp.asarray(cfg.get("loc", 10.0))
+        scale = jnp.asarray(cfg.get("scale", 2.0))
+        if dist_name in {"uniform", "flat"}:
+            low = jnp.asarray(cfg.get("low", 6.0))
+            high = jnp.asarray(cfg.get("high", 12.5))
+            return numpyro.sample("log_stellar_mass", dist.Uniform(jnp.minimum(low, high), jnp.maximum(low, high)))
+        if dist_name in {"normal", "gaussian"}:
+            return numpyro.sample("log_stellar_mass", dist.Normal(loc, scale))
+        df = jnp.asarray(cfg.get("df", 5.0))
+        return numpyro.sample("log_stellar_mass", dist.StudentT(df=df, loc=loc, scale=scale))
+    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
+        return numpyro.sample("log_stellar_mass", dist.Normal(jnp.asarray(cfg[0]), jnp.asarray(cfg[1])))
+    return numpyro.sample("log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
+
+
+def _ssp_lgmet_solar_offset(ssp_lgmet):
+    """Infer whether SSP metallicities are absolute log10(Z) or log10(Z/Zsun)."""
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    return jnp.where(jnp.nanmax(ssp_lgmet) < -1.0, jnp.log10(0.019), 0.0)
+
+
+def _mass_metallicity_relation_logprior(log_stellar_mass, gal_lgmet, prior_config, ssp_lgmet):
+    """Return optional soft host mass-metallicity log-prior."""
+    cfg = prior_config.get("mass_metallicity_relation", None)
+    if cfg is None:
+        cfg = prior_config.get("mzr", None)
+    if not isinstance(cfg, dict) or cfg.get("enabled", True) is False:
+        return jnp.asarray(0.0, dtype=jnp.float64)
+
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    solar_offset = _ssp_lgmet_solar_offset(ssp_lgmet)
+    pivot_mass = jnp.asarray(cfg.get("pivot_mass", 10.0), dtype=jnp.float64)
+    pivot_lgmet = jnp.asarray(cfg.get("pivot_lgmet", cfg.get("pivot_logzsol", -0.15)), dtype=jnp.float64)
+    if "pivot_lgmet" not in cfg:
+        pivot_lgmet = pivot_lgmet + solar_offset
+    slope = jnp.asarray(cfg.get("slope", 0.35), dtype=jnp.float64)
+    scale = jnp.maximum(jnp.asarray(cfg.get("scale", 0.25), dtype=jnp.float64), 1e-6)
+    min_lgmet = jnp.asarray(cfg.get("min_lgmet", cfg.get("min", -1.5)), dtype=jnp.float64)
+    max_lgmet = jnp.asarray(cfg.get("max_lgmet", cfg.get("max", 0.3)), dtype=jnp.float64)
+    if "min_lgmet" not in cfg:
+        min_lgmet = min_lgmet + solar_offset
+    if "max_lgmet" not in cfg:
+        max_lgmet = max_lgmet + solar_offset
+    min_lgmet = jnp.maximum(min_lgmet, jnp.nanmin(ssp_lgmet))
+    max_lgmet = jnp.minimum(max_lgmet, jnp.nanmax(ssp_lgmet))
+
+    loc = pivot_lgmet + slope * (jnp.asarray(log_stellar_mass, dtype=jnp.float64) - pivot_mass)
+    loc = jnp.clip(loc, jnp.minimum(min_lgmet, max_lgmet), jnp.maximum(min_lgmet, max_lgmet))
+    return dist.Normal(loc, scale).log_prob(jnp.asarray(gal_lgmet, dtype=jnp.float64))
+
+
+def _template_grid_age_met_arrays(fsps_grid):
+    """Return flattened age and metallicity arrays matching template order."""
+    ages = np.asarray([m.get("tage_gyr", np.nan) for m in fsps_grid.template_meta], dtype=float)
+    mets = np.asarray([m.get("logzsol", np.nan) for m in fsps_grid.template_meta], dtype=float)
+    if ages.size != fsps_grid.templates.shape[1] or not np.all(np.isfinite(ages)):
+        ages = np.tile(np.asarray(fsps_grid.age_grid_gyr, dtype=float), len(fsps_grid.logzsol_grid))
+    if mets.size != fsps_grid.templates.shape[1] or not np.all(np.isfinite(mets)):
+        mets = np.repeat(np.asarray(fsps_grid.logzsol_grid, dtype=float), len(fsps_grid.age_grid_gyr))
+    return _np_to_jnp(ages), _np_to_jnp(mets)
+
+
+def _delayed_sfh_template_weights(fsps_grid, prior_config, host_amp):
+    """Build delayed-tau SFH host weights over the SSP template grid."""
+    template_age_gyr, template_lgmet = _template_grid_age_met_arrays(fsps_grid)
+    max_age = jnp.maximum(jnp.nanmax(template_age_gyr), 1e-3)
+    min_age = jnp.maximum(jnp.nanmin(template_age_gyr), 1e-3)
+
+    log_stellar_mass = _sample_log_stellar_mass(prior_config)
+    log_age_loc, log_age_scale = _cfg_mean_scale_from_prior_config(prior_config, "log_sfh_age_gyr", jnp.log(max_age), 1.0)
+    log_tau_loc, log_tau_scale = _cfg_mean_scale_from_prior_config(prior_config, "log_sfh_tau_gyr", np.log(1.0), 1.0)
+    log_sfh_age_gyr = numpyro.sample(
+        "log_sfh_age_gyr",
+        dist.TruncatedNormal(log_age_loc, log_age_scale, low=jnp.log(min_age), high=jnp.log(max_age * 1.01)),
+    )
+    log_sfh_tau_gyr = numpyro.sample(
+        "log_sfh_tau_gyr",
+        dist.TruncatedNormal(log_tau_loc, log_tau_scale, low=jnp.log(0.03), high=jnp.log(30.0)),
+    )
+    sfh_age_gyr = jnp.exp(log_sfh_age_gyr)
+    sfh_tau_gyr = jnp.exp(log_sfh_tau_gyr)
+
+    gal_lgmet = numpyro.sample(
+        "gal_lgmet",
+        dist.Normal(*_cfg_mean_scale_from_prior_config(prior_config, "gal_lgmet", 0.0, 0.5)),
+    )
+    gal_lgmet_scatter = numpyro.sample(
+        "gal_lgmet_scatter",
+        dist.HalfNormal(_cfg_halfnormal_from_prior_config(prior_config, "gal_lgmet_scatter", 0.2)),
+    )
+    mmr_logprior = _mass_metallicity_relation_logprior(log_stellar_mass, gal_lgmet, prior_config, template_lgmet)
+    numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
+
+    formation_age = sfh_age_gyr - template_age_gyr
+    age_weights = jnp.where(
+        (formation_age > 0.0) & (template_age_gyr <= sfh_age_gyr),
+        formation_age * jnp.exp(-formation_age / jnp.maximum(sfh_tau_gyr, 1e-6)),
+        0.0,
+    )
+    age_weights = age_weights / jnp.maximum(jnp.sum(age_weights), 1e-30)
+    met_weights = jnp.exp(-0.5 * ((template_lgmet - gal_lgmet) / jnp.maximum(gal_lgmet_scatter, 1e-4)) ** 2)
+    raw_weights = age_weights * met_weights
+    weights_frac = raw_weights / jnp.maximum(jnp.sum(raw_weights), 1e-30)
+
+    numpyro.deterministic("sfh_age_gyr", sfh_age_gyr)
+    numpyro.deterministic("sfh_tau_gyr", sfh_tau_gyr)
+    numpyro.deterministic("mass_metallicity_relation_logprior", mmr_logprior)
+    return host_amp * weights_frac, weights_frac
+
+
 def _sample_from_prior_config(key, cfg):
     """Sample one parameter from a lightweight prior config dictionary."""
     dist_name = str(cfg.get("dist", "Normal")).lower()
@@ -492,7 +629,8 @@ def reconstruct_posterior_components(
         )
         templates = np.asarray(fsps_grid.templates, dtype=float)
     else:
-        templates = np.zeros((wave_out.size, 1), dtype=float)
+        n_templates = int(len(tuple(age_grid_gyr)) * len(tuple(logzsol_grid)))
+        templates = np.zeros((wave_out.size, n_templates), dtype=float)
     lnwave = np.log(wave_out)
     custom_components = normalize_custom_components(custom_components)
 
@@ -1057,12 +1195,18 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             log_lambda_llambda_agn[wave_lum] = jnp.asarray(jnp.nan)
     ntemp = fsps_grid.templates.shape[1]
     if decompose_host:
-        tau_host = numpyro.sample('tau_host', dist.HalfNormal(_cfg_halfnorm('tau_host')))
-        tau_host_eff = jnp.maximum(tau_host, 1e-6)
-        raw_w_loc, _ = _cfg_norm('raw_w')
-        raw_w = numpyro.sample('fsps_weights_raw', dist.Normal(jnp.full((ntemp,), raw_w_loc), tau_host_eff))
-        fsps_weights_frac = jax.nn.softmax(raw_w)
-        fsps_weights = host_amp * fsps_weights_frac
+        host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
+        if host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
+            fsps_weights, fsps_weights_frac = _delayed_sfh_template_weights(fsps_grid, prior_config, host_amp)
+        elif host_sfh_model in {"flexible", "free", "template_weights", "ssp_weights"}:
+            tau_host = numpyro.sample('tau_host', dist.HalfNormal(_cfg_halfnorm('tau_host')))
+            tau_host_eff = jnp.maximum(tau_host, 1e-6)
+            raw_w_loc, _ = _cfg_norm('raw_w')
+            raw_w = numpyro.sample('fsps_weights_raw', dist.Normal(jnp.full((ntemp,), raw_w_loc), tau_host_eff))
+            fsps_weights_frac = jax.nn.softmax(raw_w)
+            fsps_weights = host_amp * fsps_weights_frac
+        else:
+            raise ValueError("host_sfh_model must be one of: 'flexible', 'delayed'.")
         gal_v_kms = numpyro.sample('gal_v_kms', dist.Normal(*_cfg_norm('gal_v_kms')))
         gal_sigma_kms = numpyro.sample('gal_sigma_kms', dist.HalfNormal(_cfg_halfnorm('gal_sigma_kms')))
         gal_intrinsic = jnp.dot(templates, fsps_weights)

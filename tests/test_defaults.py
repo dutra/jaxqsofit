@@ -21,6 +21,7 @@ def test_build_default_prior_config_has_expected_keys():
         'log_frac_host',
         'tau_host',
         'raw_w',
+        'host_sfh_model',
         'line_dmu_scale_mult',
         'line_sig_scale_mult',
         'line_amp_scale_mult',
@@ -29,6 +30,7 @@ def test_build_default_prior_config_has_expected_keys():
     ]
     for k in required:
         assert k in cfg
+    assert cfg["host_sfh_model"] == "delayed"
 
 
 def test_build_default_prior_config_scales_with_flux_median():

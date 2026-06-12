@@ -170,6 +170,7 @@ def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_lum
     flux = np.ones_like(wave)
     err = np.full_like(wave, 0.1)
     cfg = build_default_prior_config(flux)
+    cfg["host_sfh_model"] = "flexible"
 
     class _Grid:
         templates = np.zeros((wave.size, 1), dtype=float)
@@ -213,6 +214,85 @@ def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_lum
         site_name = f"log_lambda_Llambda_{wave_label}_agn"
         assert site_name in tr
         assert np.isfinite(float(tr[site_name]["value"]))
+
+
+def test_qso_fsps_joint_model_supports_delayed_sfh_host_with_mzr():
+    wave = np.linspace(2000.0, 6000.0, 32)
+    flux = np.ones_like(wave)
+    err = np.full_like(wave, 0.1)
+    cfg = build_default_prior_config(flux)
+    cfg["host_sfh_model"] = "delayed"
+    cfg["mass_metallicity_relation"] = {
+        "enabled": True,
+        "pivot_mass": 10.0,
+        "pivot_logzsol": -0.1,
+        "slope": 0.25,
+        "scale": 0.3,
+    }
+
+    class _Grid:
+        templates = np.column_stack(
+            [
+                np.ones(wave.size),
+                np.linspace(0.8, 1.2, wave.size),
+                np.linspace(1.2, 0.8, wave.size),
+                np.full(wave.size, 0.7),
+            ]
+        )
+        template_meta = [
+            {"tage_gyr": 0.1, "logzsol": -0.5},
+            {"tage_gyr": 1.0, "logzsol": -0.5},
+            {"tage_gyr": 0.1, "logzsol": 0.0},
+            {"tage_gyr": 1.0, "logzsol": 0.0},
+        ]
+        age_grid_gyr = np.array([0.1, 1.0])
+        logzsol_grid = np.array([-0.5, 0.0])
+
+    params = {
+        "cont_norm": np.array(1.0),
+        "log_frac_host": np.array(1.0),
+        "PL_norm": np.array(1.0),
+        "PL_slope": np.array(0.0),
+        "log_stellar_mass": np.array(10.0),
+        "log_sfh_age_gyr": np.log(1.0),
+        "log_sfh_tau_gyr": np.log(0.5),
+        "gal_lgmet": np.array(-0.1),
+        "gal_lgmet_scatter": np.array(0.2),
+        "gal_v_kms": np.array(0.0),
+        "gal_sigma_kms": np.array(100.0),
+        "frac_jitter": np.array(0.0),
+        "add_jitter": np.array(0.0),
+    }
+    tr = trace(substitute(seed(qso_fsps_joint_model, jax.random.PRNGKey(0)), data=params)).get_trace(
+        wave=wave,
+        flux=flux,
+        err=err,
+        conti_priors={},
+        tied_line_meta={"n_lines": 0},
+        fsps_grid=_Grid(),
+        fe_uv_wave=np.array([2000.0, 6000.0]),
+        fe_uv_flux=np.zeros(2),
+        fe_op_wave=np.array([2000.0, 6000.0]),
+        fe_op_flux=np.zeros(2),
+        use_lines=False,
+        prior_config=cfg,
+        decompose_host=True,
+        fit_pl=True,
+        fit_fe=False,
+        fit_bc=False,
+        fit_poly=False,
+        fit_reddening=False,
+    )
+
+    weights = np.asarray(tr["fsps_weights_frac"]["value"])
+    assert weights.shape == (4,)
+    assert np.isclose(np.sum(weights), 1.0)
+    assert np.all(weights >= 0.0)
+    assert "mass_metallicity_relation_prior" in tr
+    assert "mass_metallicity_relation_logprior" in tr
+    assert np.isfinite(float(tr["mass_metallicity_relation_logprior"]["value"]))
+    assert np.isfinite(float(tr["sfh_age_gyr"]["value"]))
+    assert np.isfinite(float(tr["sfh_tau_gyr"]["value"]))
 
 
 def test_qso_fsps_joint_model_fast_line_path_matches_component_split():
@@ -484,6 +564,7 @@ def test_qso_fsps_joint_model_reports_host_redshift_prior_diagnostics():
     err = np.full_like(wave, 0.1)
     cfg = build_default_prior_config(flux)
     cfg["host_redshift_prior"]["enabled"] = True
+    cfg["host_sfh_model"] = "flexible"
 
     class _Grid:
         templates = np.zeros((wave.size, 1), dtype=float)
