@@ -113,7 +113,7 @@ def test_reconstruct_posterior_components_host_disabled_uses_dummy_grid(monkeypa
         "PL_norm": np.array([1.0, 1.0]),
         "PL_slope": np.array([0.0, 0.0]),
     }
-    pred_out = {"fsps_weights": np.ones((2, 1))}
+    pred_out = {"fsps_weights": np.ones((2, 4))}
 
     out = modelmod.reconstruct_posterior_components(
         wave_out=wave_out,

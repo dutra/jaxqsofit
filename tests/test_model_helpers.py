@@ -3,14 +3,17 @@ import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
+from jaxsedfit.host import HostBasisJax
 
 import jaxqsofit.model as model_mod
 from jaxqsofit.defaults import build_default_prior_config
 from jaxqsofit.custom_components import make_custom_component
 from jaxqsofit.model import (
+    _fe_template_component,
     _host_redshift_prior_params,
     _extract_line_table_from_prior_config,
     _luminosity_distance_cm_jax,
+    _shift_and_broaden_single_spectrum_lnlam,
     build_tied_line_meta_from_linelist,
     qso_fsps_joint_model,
 )
@@ -28,6 +31,59 @@ def test_extract_line_table_from_prior_config_layouts():
     assert _extract_line_table_from_prior_config(cfg2) is table
     assert _extract_line_table_from_prior_config(cfg3) is table
     assert _extract_line_table_from_prior_config(cfg4) is table
+
+
+def test_fe_template_component_smoothly_bounds_fwhm_below_template_base():
+    wave = jnp.linspace(1900.0, 3100.0, 256)
+    wave_template = jnp.linspace(2000.0, 3000.0, 128)
+    flux_template = jnp.exp(-0.5 * ((wave_template - 2500.0) / 80.0) ** 2)
+
+    def component_sum(fwhm_kms):
+        return jnp.sum(
+            _fe_template_component(
+                wave,
+                wave_template,
+                flux_template,
+                norm=1.0,
+                fwhm_kms=fwhm_kms,
+                shift_frac=0.0,
+                base_fwhm_kms=2000.0,
+            )
+        )
+
+    component = _fe_template_component(
+        wave,
+        wave_template,
+        flux_template,
+        norm=1.0,
+        fwhm_kms=1500.0,
+        shift_frac=0.0,
+        base_fwhm_kms=2000.0,
+    )
+    grad = jax.grad(component_sum)(1500.0)
+
+    assert bool(jnp.all(jnp.isfinite(component)))
+    assert float(jnp.max(component)) > 0.0
+    assert bool(jnp.isfinite(grad))
+
+
+def test_shift_and_broaden_uses_wide_kernel_for_broad_components():
+    n_pix = 4097
+    dln = 1e-4
+    lnwave = jnp.log(5000.0) + dln * (jnp.arange(n_pix) - n_pix // 2)
+    spectrum = jnp.zeros(n_pix).at[n_pix // 2].set(1.0)
+    sigma_kms = 200.0 * dln * model_mod.C_KMS
+
+    broadened = _shift_and_broaden_single_spectrum_lnlam(
+        lnwave,
+        spectrum,
+        v_kms=0.0,
+        sigma_kms=sigma_kms,
+    )
+
+    assert bool(jnp.all(jnp.isfinite(broadened)))
+    assert float(jnp.sum(broadened)) > 0.99
+    assert float(jnp.max(broadened)) < 0.003
 
 
 def test_build_tied_line_meta_from_linelist_minimal():
@@ -115,6 +171,7 @@ def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_lum
     flux = np.ones_like(wave)
     err = np.full_like(wave, 0.1)
     cfg = build_default_prior_config(flux)
+    cfg["host_sfh_model"] = "flexible"
 
     class _Grid:
         templates = np.zeros((wave.size, 1), dtype=float)
@@ -158,6 +215,164 @@ def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_lum
         site_name = f"log_lambda_Llambda_{wave_label}_agn"
         assert site_name in tr
         assert np.isfinite(float(tr[site_name]["value"]))
+
+
+def test_qso_fsps_joint_model_supports_delayed_sfh_host_with_mzr():
+    wave = np.linspace(2000.0, 6000.0, 32)
+    flux = np.ones_like(wave)
+    err = np.full_like(wave, 0.1)
+    cfg = build_default_prior_config(flux)
+    cfg["host_sfh_model"] = "delayed"
+    cfg["mass_metallicity_relation"] = {
+        "enabled": True,
+        "pivot_mass": 10.0,
+        "pivot_logzsol": -0.1,
+        "slope": 0.25,
+        "scale": 0.3,
+    }
+
+    class _Grid:
+        templates = np.column_stack(
+            [
+                np.ones(wave.size),
+                np.linspace(0.8, 1.2, wave.size),
+                np.linspace(1.2, 0.8, wave.size),
+                np.full(wave.size, 0.7),
+            ]
+        )
+        template_meta = [
+            {"tage_gyr": 0.1, "logzsol": -0.5},
+            {"tage_gyr": 1.0, "logzsol": -0.5},
+            {"tage_gyr": 0.1, "logzsol": 0.0},
+            {"tage_gyr": 1.0, "logzsol": 0.0},
+        ]
+        age_grid_gyr = np.array([0.1, 1.0])
+        logzsol_grid = np.array([-0.5, 0.0])
+
+    params = {
+        "cont_norm": np.array(1.0),
+        "log_frac_host": np.array(1.0),
+        "PL_norm": np.array(1.0),
+        "PL_slope": np.array(0.0),
+        "log_stellar_mass": np.array(10.0),
+        "log_sfh_age_gyr": np.log(1.0),
+        "log_sfh_tau_gyr": np.log(0.5),
+        "gal_lgmet": np.array(-0.1),
+        "gal_lgmet_scatter": np.array(0.2),
+        "gal_v_kms": np.array(0.0),
+        "gal_sigma_kms": np.array(100.0),
+        "frac_jitter": np.array(0.0),
+        "add_jitter": np.array(0.0),
+    }
+    tr = trace(substitute(seed(qso_fsps_joint_model, jax.random.PRNGKey(0)), data=params)).get_trace(
+        wave=wave,
+        flux=flux,
+        err=err,
+        conti_priors={},
+        tied_line_meta={"n_lines": 0},
+        fsps_grid=_Grid(),
+        fe_uv_wave=np.array([2000.0, 6000.0]),
+        fe_uv_flux=np.zeros(2),
+        fe_op_wave=np.array([2000.0, 6000.0]),
+        fe_op_flux=np.zeros(2),
+        use_lines=False,
+        prior_config=cfg,
+        decompose_host=True,
+        fit_pl=True,
+        fit_fe=False,
+        fit_bc=False,
+        fit_poly=False,
+        fit_reddening=False,
+    )
+
+    weights = np.asarray(tr["fsps_weights_frac"]["value"])
+    assert weights.shape == (4,)
+    assert np.isclose(np.sum(weights), 1.0)
+    assert np.all(weights >= 0.0)
+    assert "mass_metallicity_relation_prior" in tr
+    assert "mass_metallicity_relation_logprior" in tr
+    assert np.isfinite(float(tr["mass_metallicity_relation_logprior"]["value"]))
+    assert np.isfinite(float(tr["sfh_age_gyr"]["value"]))
+    assert np.isfinite(float(tr["sfh_tau_gyr"]["value"]))
+
+
+def test_delayed_sfh_host_uses_physical_stellar_mass_scaling():
+    wave = np.linspace(4000.0, 4100.0, 16)
+    flux = np.ones_like(wave)
+    err = np.full_like(wave, 0.1)
+    cfg = build_default_prior_config(flux)
+    cfg["host_sfh_model"] = "delayed"
+    cfg["mass_metallicity_relation"] = {"enabled": False}
+    cfg["log_host_aperture_scale"] = {"dist": "Normal", "loc": 0.0, "scale": 0.1}
+
+    class _Grid:
+        templates = np.zeros((wave.size, 4), dtype=float)
+        template_meta = [
+            {"tage_gyr": 0.1, "logzsol": -0.5, "dsps_lg_age_gyr": -1.0, "dsps_lgmet": -1.0},
+            {"tage_gyr": 1.0, "logzsol": -0.5, "dsps_lg_age_gyr": 0.0, "dsps_lgmet": -1.0},
+            {"tage_gyr": 0.1, "logzsol": 0.0, "dsps_lg_age_gyr": -1.0, "dsps_lgmet": -0.5},
+            {"tage_gyr": 1.0, "logzsol": 0.0, "dsps_lg_age_gyr": 0.0, "dsps_lgmet": -0.5},
+        ]
+        age_grid_gyr = np.array([0.1, 1.0])
+        logzsol_grid = np.array([-0.5, 0.0])
+        host_basis_jax = HostBasisJax(
+            ssp_lgmet=jnp.array([-1.0, -0.5, 0.0], dtype=jnp.float64),
+            ssp_lg_age_gyr=jnp.log10(jnp.array([0.1, 0.5, 1.0], dtype=jnp.float64)),
+            rest_llambda=jnp.ones((3, 3, wave.size), dtype=jnp.float64),
+            surviving_frac_by_age=jnp.ones((3,), dtype=jnp.float64),
+            n_ly_per_msun=jnp.zeros((3, 3), dtype=jnp.float64),
+            ly_lum_per_msun=jnp.zeros((3, 3), dtype=jnp.float64),
+            gal_t_table=jnp.geomspace(0.01, 1.2, 16),
+        )
+        t_obs_gyr = 1.2
+
+    base_params = {
+        "cont_norm": np.array(1.0),
+        "log_frac_host": np.array(0.0),
+        "PL_norm": np.array(0.0),
+        "PL_slope": np.array(0.0),
+        "log_sfh_age_gyr": np.log(1.0),
+        "log_sfh_tau_gyr": np.log(0.5),
+        "gal_lgmet": np.array(-0.5),
+        "gal_lgmet_scatter": np.array(0.2),
+        "log_host_aperture_scale": np.array(0.0),
+        "gal_v_kms": np.array(0.0),
+        "gal_sigma_kms": np.array(1.0),
+        "frac_jitter": np.array(0.0),
+        "add_jitter": np.array(0.0),
+    }
+
+    def _host_for_mass(log_stellar_mass):
+        params = dict(base_params, log_stellar_mass=np.array(log_stellar_mass))
+        tr = trace(substitute(seed(qso_fsps_joint_model, jax.random.PRNGKey(0)), data=params)).get_trace(
+            wave=wave,
+            flux=flux,
+            err=err,
+            conti_priors={},
+            tied_line_meta={"n_lines": 0},
+            fsps_grid=_Grid(),
+            fe_uv_wave=np.array([4000.0, 4100.0]),
+            fe_uv_flux=np.zeros(2),
+            fe_op_wave=np.array([4000.0, 4100.0]),
+            fe_op_flux=np.zeros(2),
+            use_lines=False,
+            prior_config=cfg,
+            decompose_host=True,
+            fit_pl=False,
+            fit_fe=False,
+            fit_bc=False,
+            fit_poly=False,
+            fit_reddening=False,
+            z_qso=0.1,
+        )
+        return np.asarray(tr["gal_model_intrinsic"]["value"], dtype=float)
+
+    host_low = _host_for_mass(8.0)
+    host_high = _host_for_mass(10.0)
+
+    mask = host_low > 0.0
+    assert np.any(mask)
+    assert np.allclose(host_high[mask] / host_low[mask], 100.0, rtol=1e-6)
 
 
 def test_qso_fsps_joint_model_fast_line_path_matches_component_split():
@@ -429,6 +644,7 @@ def test_qso_fsps_joint_model_reports_host_redshift_prior_diagnostics():
     err = np.full_like(wave, 0.1)
     cfg = build_default_prior_config(flux)
     cfg["host_redshift_prior"]["enabled"] = True
+    cfg["host_sfh_model"] = "flexible"
 
     class _Grid:
         templates = np.zeros((wave.size, 1), dtype=float)

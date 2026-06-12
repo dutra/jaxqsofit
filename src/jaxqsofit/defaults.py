@@ -72,6 +72,11 @@ def _line_row(
     fvalue: float,
     vary: int = 1,
 ) -> Dict[str, Any]:
+    """Build one line-prior row.
+
+    Wavelength fields are rest-frame vacuum Angstroms, matching SDSS spectra
+    and the rest-frame wavelength grid used by the fitter.
+    """
     return {
         "lambda": lam,
         "compname": compname,
@@ -92,6 +97,19 @@ def _line_row(
         "fvalue": fvalue,
         "vary": vary,
     }
+
+
+def _lnlam_peak_ratio_for_flux_ratio(
+    flux_ratio: float,
+    numerator_lam: float,
+    denominator_lam: float,
+) -> float:
+    """Convert an integrated-flux ratio to a tied peak-amplitude ratio.
+
+    Line ties are applied to Gaussian peak amplitudes in ln-lambda space. For
+    equal ln-lambda widths, integrated flux scales as peak * rest wavelength.
+    """
+    return flux_ratio * denominator_lam / numerator_lam
 
 
 # Default line table in plain dict rows (same schema as notebook line config).
@@ -168,13 +186,13 @@ DEFAULT_ELG_NARROW_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     _line_row(lam=4862.68, compname='Hb', minwav=4640, maxwav=5100, linename='Hb_na_elg', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=11, windex=11, findex=0, fvalue=0.001),
     _line_row(lam=4687.02, compname='HeII', minwav=4620, maxwav=4760, linename='HeII4686', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=0, fvalue=0.001),
     _line_row(lam=4960.30, compname='OIII', minwav=4870, maxwav=5050, linename='OIII4959', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=11, windex=11, findex=32, fvalue=1.0),
-    _line_row(lam=5008.24, compname='OIII', minwav=4920, maxwav=5100, linename='OIII5007', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=11, windex=11, findex=32, fvalue=1.0),
+    _line_row(lam=5008.24, compname='OIII', minwav=4920, maxwav=5100, linename='OIII5007', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=11, windex=11, findex=32, fvalue=_lnlam_peak_ratio_for_flux_ratio(2.98, 5008.24, 4960.30)),
     _line_row(lam=5877.25, compname='HeI', minwav=5800, maxwav=5950, linename='HeI5876', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=6302.05, compname='OI', minwav=6200, maxwav=6420, linename='OI6300', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=33, fvalue=1.0),
+    _line_row(lam=6302.05, compname='OI', minwav=6200, maxwav=6420, linename='OI6300', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=33, fvalue=_lnlam_peak_ratio_for_flux_ratio(3.05, 6302.05, 6365.54)),
     _line_row(lam=6365.54, compname='OI', minwav=6280, maxwav=6460, linename='OI6363', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=33, fvalue=1.0),
     _line_row(lam=6549.85, compname='NII', minwav=6460, maxwav=6640, linename='NII6548', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=34, fvalue=1.0),
     _line_row(lam=6564.61, compname='Ha', minwav=6480, maxwav=6660, linename='Ha_na_elg', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=6585.28, compname='NII', minwav=6500, maxwav=6680, linename='NII6583', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=34, fvalue=1.0),
+    _line_row(lam=6585.28, compname='NII', minwav=6500, maxwav=6680, linename='NII6583', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=34, fvalue=_lnlam_peak_ratio_for_flux_ratio(3.0, 6585.28, 6549.85)),
     _line_row(lam=6718.29, compname='SII', minwav=6640, maxwav=6800, linename='SII6716', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=35, fvalue=1.0),
     _line_row(lam=6732.67, compname='SII', minwav=6660, maxwav=6820, linename='SII6731', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=11, windex=11, findex=35, fvalue=1.0),
     # Red optical / far-red forbidden + He I
@@ -201,11 +219,10 @@ DEFAULT_ELG_NARROW_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
 # Optional high-ionization/coronal narrow-line set.
 DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     _line_row(lam=3346.79, compname='NeV', minwav=3300, maxwav=3385, linename='NeV3346', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=12, windex=12, findex=41, fvalue=1.0),
-    _line_row(lam=3426.84, compname='NeV', minwav=3380, maxwav=3480, linename='NeV3426_hi', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=12, windex=12, findex=41, fvalue=1.0),
+    _line_row(lam=3426.84, compname='NeV', minwav=3380, maxwav=3480, linename='NeV3426_hi', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg, vindex=12, windex=12, findex=41, fvalue=_lnlam_peak_ratio_for_flux_ratio(2.7, 3426.84, 3346.79)),
     _line_row(lam=5721.0, compname='FeVII', minwav=5660, maxwav=5785, linename='FeVII5721', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
     _line_row(lam=6087.0, compname='FeVII', minwav=6030, maxwav=6145, linename='FeVII6087', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
     _line_row(lam=6374.0, compname='FeX', minwav=6320, maxwav=6430, linename='FeX6374', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
-    _line_row(lam=7065.0, compname='HeI', minwav=7000, maxwav=7125, linename='HeI7065', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
 ]
 
 
@@ -391,6 +408,22 @@ def build_default_prior_config(
         },
         "tau_host": {"dist": "HalfNormal", "scale": 1.0},
         "raw_w": {"dist": "Normal", "loc": -0.5, "scale": 1.0},
+        "host_sfh_model": "delayed",
+        "log_stellar_mass": {"dist": "StudentT", "loc": 10.0, "scale": 2.0, "df": 5.0},
+        "log_host_aperture_scale": {"dist": "Delta", "value": 0.0},
+        "log_sfh_age_gyr": {"dist": "Normal", "loc": np.log(3.0), "scale": 1.0},
+        "log_sfh_tau_gyr": {"dist": "Normal", "loc": np.log(1.0), "scale": 1.0},
+        "gal_lgmet": {"dist": "Normal", "loc": 0.0, "scale": 0.5},
+        "gal_lgmet_scatter": {"dist": "HalfNormal", "scale": 0.2},
+        "mass_metallicity_relation": {
+            "enabled": False,
+            "pivot_mass": 10.0,
+            "pivot_logzsol": -0.15,
+            "slope": 0.35,
+            "scale": 0.25,
+            "min": -1.5,
+            "max": 0.3,
+        },
         "gal_v_kms": {"dist": "Normal", "loc": 0.0, "scale": 120.0},
         "gal_sigma_kms": {"dist": "HalfNormal", "scale": 200.0},
         "log_Fe_uv_norm": {"dist": "LogNormal", "loc": np.log(max(1e-3 * fscale, AMPLITUDE_FLOOR)), "scale": 0.5},

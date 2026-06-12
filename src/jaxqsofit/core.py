@@ -766,6 +766,7 @@ class QSOFit:
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
             decompose_host=decompose_host,
+            z_qso=float(getattr(self, "z", 0.0)),
         )
         self.tied_line_meta = tied_line_meta
 
@@ -845,7 +846,7 @@ class QSOFit:
         return out_file
 
     @staticmethod
-    def _build_fsps_grid_for_fit(wave, age_grid_gyr, logzsol_grid, dsps_ssp_fn, decompose_host):
+    def _build_fsps_grid_for_fit(wave, age_grid_gyr, logzsol_grid, dsps_ssp_fn, decompose_host, z_qso=0.0):
         """Build the host-template grid only when host decomposition is enabled."""
         if decompose_host:
             return build_fsps_template_grid(
@@ -853,6 +854,7 @@ class QSOFit:
                 age_grid_gyr=age_grid_gyr,
                 logzsol_grid=logzsol_grid,
                 dsps_ssp_fn=dsps_ssp_fn,
+                z_qso=z_qso,
             )
 
         class _DummyFSPSGrid:
@@ -877,6 +879,8 @@ class QSOFit:
                 })
         grid.age_grid_gyr = age_grid_gyr
         grid.logzsol_grid = logzsol_grid
+        grid.host_basis_jax = None
+        grid.t_obs_gyr = None
         return grid
 
     @classmethod
@@ -990,6 +994,7 @@ class QSOFit:
             verbose=True,
             fsps_age_grid=(0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0),
             fsps_logzsol_grid=(-1.0, -0.5, 0.0, 0.2),
+            host_sfh_model=None,
             prior_config=None,
             dsps_ssp_fn='tempdata.h5',
             nuts_warmup=50,
@@ -1066,6 +1071,13 @@ class QSOFit:
             SSP age grid in Gyr.
         fsps_logzsol_grid : sequence of float, optional
             SSP metallicity grid in log(Z/Zsun).
+        host_sfh_model : {'flexible', 'delayed'} or None, optional
+            Host stellar-population parameterization. ``'flexible'`` uses the
+            historical free SSP-template weights. ``'delayed'`` uses a
+            delayed-exponential SFH over the same template grid and supports
+            ``log_stellar_mass`` plus optional ``mass_metallicity_relation`` or
+            ``mzr`` priors in ``prior_config``. If None, use the value already
+            present in ``prior_config`` or the default config.
         prior_config : dict or None, optional
             Prior/config dictionary. If None, defaults are auto-built.
         dsps_ssp_fn : str, optional
@@ -1119,6 +1131,7 @@ class QSOFit:
         self._fit_method = str(fit_method)
         self._fit_fsps_age_grid = tuple(fsps_age_grid)
         self._fit_fsps_logzsol_grid = tuple(fsps_logzsol_grid)
+        self._fit_host_sfh_model = None if host_sfh_model is None else str(host_sfh_model)
         self._fit_prior_config = prior_config
         self._fit_dsps_ssp_fn = str(dsps_ssp_fn)
         self._fit_use_psf_phot = bool(use_psf_phot)
@@ -1179,6 +1192,9 @@ class QSOFit:
 
         if prior_config_input is None:
             prior_config = build_default_prior_config(self.flux)
+        if host_sfh_model is not None:
+            prior_config["host_sfh_model"] = str(host_sfh_model)
+        self._fit_host_sfh_model = str(prior_config.get("host_sfh_model", "flexible"))
         prior_config = inject_default_custom_component_priors(
             prior_config=prior_config,
             flux=self.flux,
@@ -1389,6 +1405,7 @@ class QSOFit:
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
             decompose_host=decompose_host,
+            z_qso=self.z,
         )
         self.tied_line_meta = tied_line_meta
 
@@ -1566,6 +1583,7 @@ class QSOFit:
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
             decompose_host=decompose_host,
+            z_qso=self.z,
         )
         self.tied_line_meta = tied_line_meta
 
