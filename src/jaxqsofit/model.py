@@ -712,7 +712,7 @@ def build_tied_line_meta_from_linelist(linelist, wave):
         for i in range(int(row.get('ngauss', 1))):
             ln0 = np.log(float(row['lambda']))
             voff = float(row['voff'])
-            dln = voff / C_KMS
+            dln = voff
             ln_lambda0.append(ln0)
             line_lambda.append(float(row['lambda']))
             amp_init.append(float(row['inisca']))
