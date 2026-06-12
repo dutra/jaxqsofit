@@ -12,6 +12,7 @@ from jaxqsofit.model import (
     _host_redshift_prior_params,
     _extract_line_table_from_prior_config,
     _luminosity_distance_cm_jax,
+    _shift_and_broaden_single_spectrum_lnlam,
     build_tied_line_meta_from_linelist,
     qso_fsps_joint_model,
 )
@@ -63,6 +64,25 @@ def test_fe_template_component_smoothly_bounds_fwhm_below_template_base():
     assert bool(jnp.all(jnp.isfinite(component)))
     assert float(jnp.max(component)) > 0.0
     assert bool(jnp.isfinite(grad))
+
+
+def test_shift_and_broaden_uses_wide_kernel_for_broad_components():
+    n_pix = 4097
+    dln = 1e-4
+    lnwave = jnp.log(5000.0) + dln * (jnp.arange(n_pix) - n_pix // 2)
+    spectrum = jnp.zeros(n_pix).at[n_pix // 2].set(1.0)
+    sigma_kms = 200.0 * dln * model_mod.C_KMS
+
+    broadened = _shift_and_broaden_single_spectrum_lnlam(
+        lnwave,
+        spectrum,
+        v_kms=0.0,
+        sigma_kms=sigma_kms,
+    )
+
+    assert bool(jnp.all(jnp.isfinite(broadened)))
+    assert float(jnp.sum(broadened)) > 0.99
+    assert float(jnp.max(broadened)) < 0.003
 
 
 def test_build_tied_line_meta_from_linelist_minimal():

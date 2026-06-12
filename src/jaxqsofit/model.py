@@ -229,7 +229,7 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms)
     dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
     sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=128)
+    kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512)
 
     wave = jnp.exp(lnwave)
     shift_ln = v_kms / C_KMS
