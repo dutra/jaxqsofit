@@ -15,6 +15,11 @@ import numpyro.distributions as dist
 
 from dsps import load_ssp_templates
 from dustmaps.sfd import SFDQuery
+from jaxsedfit.host import (
+    HostBasisJax,
+    build_host_basis_jax,
+    build_host_state as build_jaxsedfit_host_state,
+)
 from .custom_components import (
     CustomComponentSpec,
     CustomLineComponentSpec,
@@ -29,6 +34,8 @@ _SFD_QUERY_CACHE: Dict[str, Any] = {}
 _LUMINOSITY_H0 = 70.0
 _LUMINOSITY_OM0 = 0.3
 MPC_TO_CM = 3.085677581491367e24
+W_PER_A_TO_CGS_PER_A = 1.0e7
+CGS_TO_JAXQSOFIT_FLUX = 1.0e17
 AMPLITUDE_FLOOR = 1e-32
 
 
@@ -130,6 +137,27 @@ def _luminosity_distance_cm_jax(z):
 
     d_l_cm = _one_distance(z) if scalar_input else jax.vmap(_one_distance)(z)
     return jnp.reshape(d_l_cm, ()) if scalar_input else d_l_cm
+
+
+def _cosmic_age_gyr(z: float) -> float:
+    """Return cosmic age in Gyr for the fixed flat LCDM helper cosmology."""
+    z = max(float(z), 0.0)
+    grid = np.geomspace(1.0 + z, 1.0e4, 2048, dtype=float)
+    ez = np.sqrt(np.maximum(_LUMINOSITY_OM0 * grid**3 + (1.0 - _LUMINOSITY_OM0), 1.0e-18))
+    integral = np.trapezoid(1.0 / (grid * ez), x=grid)
+    h0_s = (_LUMINOSITY_H0 * 1.0e5) / MPC_TO_CM
+    return float(integral / h0_s / (365.25 * 24.0 * 3600.0 * 1.0e9))
+
+
+def _host_luminosity_w_a_to_rest_flux_units(host_rest_lum_w_a, z_qso):
+    """Convert rest L_lambda in W/A to JAXQSOFit rest-frame flux units."""
+    d_l_cm = _luminosity_distance_cm_jax(z_qso)
+    flux_cgs_rest = (
+        jnp.asarray(host_rest_lum_w_a, dtype=jnp.float64)
+        * W_PER_A_TO_CGS_PER_A
+        / jnp.maximum(4.0 * jnp.pi * d_l_cm**2, 1.0e-300)
+    )
+    return flux_cgs_rest * CGS_TO_JAXQSOFIT_FLUX
 
 
 def _rest_log_lambda_llambda_from_flam(wave_rest, flam_rest, z):
@@ -321,84 +349,6 @@ def _cfg_norm_from_prior_config(prior_config, key):
     return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
 
 
-def _cfg_mean_scale_from_prior_config(prior_config, key, default_loc, default_scale):
-    """Read Normal-like prior location/scale with defaults."""
-    cfg = prior_config.get(key, None)
-    if isinstance(cfg, dict):
-        return jnp.asarray(cfg.get("loc", default_loc)), jnp.asarray(cfg.get("scale", default_scale))
-    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
-        return jnp.asarray(cfg[0]), jnp.asarray(cfg[1])
-    return jnp.asarray(default_loc), jnp.asarray(default_scale)
-
-
-def _cfg_halfnormal_from_prior_config(prior_config, key, default_scale):
-    """Read HalfNormal scale with a default."""
-    cfg = prior_config.get(key, None)
-    if isinstance(cfg, dict):
-        return jnp.asarray(cfg.get("scale", default_scale))
-    if isinstance(cfg, (tuple, list)) and len(cfg) >= 1:
-        return jnp.asarray(cfg[0])
-    if cfg is not None:
-        return jnp.asarray(cfg)
-    return jnp.asarray(default_scale)
-
-
-def _sample_log_stellar_mass(prior_config):
-    """Sample host stellar mass for physical-SFH host modes."""
-    cfg = prior_config.get("log_stellar_mass", None)
-    if isinstance(cfg, dict):
-        dist_name = str(cfg.get("dist", "StudentT")).lower()
-        loc = jnp.asarray(cfg.get("loc", 10.0))
-        scale = jnp.asarray(cfg.get("scale", 2.0))
-        if dist_name in {"uniform", "flat"}:
-            low = jnp.asarray(cfg.get("low", 6.0))
-            high = jnp.asarray(cfg.get("high", 12.5))
-            return numpyro.sample("log_stellar_mass", dist.Uniform(jnp.minimum(low, high), jnp.maximum(low, high)))
-        if dist_name in {"normal", "gaussian"}:
-            return numpyro.sample("log_stellar_mass", dist.Normal(loc, scale))
-        df = jnp.asarray(cfg.get("df", 5.0))
-        return numpyro.sample("log_stellar_mass", dist.StudentT(df=df, loc=loc, scale=scale))
-    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
-        return numpyro.sample("log_stellar_mass", dist.Normal(jnp.asarray(cfg[0]), jnp.asarray(cfg[1])))
-    return numpyro.sample("log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
-
-
-def _ssp_lgmet_solar_offset(ssp_lgmet):
-    """Infer whether SSP metallicities are absolute log10(Z) or log10(Z/Zsun)."""
-    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
-    return jnp.where(jnp.nanmax(ssp_lgmet) < -1.0, jnp.log10(0.019), 0.0)
-
-
-def _mass_metallicity_relation_logprior(log_stellar_mass, gal_lgmet, prior_config, ssp_lgmet):
-    """Return optional soft host mass-metallicity log-prior."""
-    cfg = prior_config.get("mass_metallicity_relation", None)
-    if cfg is None:
-        cfg = prior_config.get("mzr", None)
-    if not isinstance(cfg, dict) or cfg.get("enabled", True) is False:
-        return jnp.asarray(0.0, dtype=jnp.float64)
-
-    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
-    solar_offset = _ssp_lgmet_solar_offset(ssp_lgmet)
-    pivot_mass = jnp.asarray(cfg.get("pivot_mass", 10.0), dtype=jnp.float64)
-    pivot_lgmet = jnp.asarray(cfg.get("pivot_lgmet", cfg.get("pivot_logzsol", -0.15)), dtype=jnp.float64)
-    if "pivot_lgmet" not in cfg:
-        pivot_lgmet = pivot_lgmet + solar_offset
-    slope = jnp.asarray(cfg.get("slope", 0.35), dtype=jnp.float64)
-    scale = jnp.maximum(jnp.asarray(cfg.get("scale", 0.25), dtype=jnp.float64), 1e-6)
-    min_lgmet = jnp.asarray(cfg.get("min_lgmet", cfg.get("min", -1.5)), dtype=jnp.float64)
-    max_lgmet = jnp.asarray(cfg.get("max_lgmet", cfg.get("max", 0.3)), dtype=jnp.float64)
-    if "min_lgmet" not in cfg:
-        min_lgmet = min_lgmet + solar_offset
-    if "max_lgmet" not in cfg:
-        max_lgmet = max_lgmet + solar_offset
-    min_lgmet = jnp.maximum(min_lgmet, jnp.nanmin(ssp_lgmet))
-    max_lgmet = jnp.minimum(max_lgmet, jnp.nanmax(ssp_lgmet))
-
-    loc = pivot_lgmet + slope * (jnp.asarray(log_stellar_mass, dtype=jnp.float64) - pivot_mass)
-    loc = jnp.clip(loc, jnp.minimum(min_lgmet, max_lgmet), jnp.maximum(min_lgmet, max_lgmet))
-    return dist.Normal(loc, scale).log_prob(jnp.asarray(gal_lgmet, dtype=jnp.float64))
-
-
 def _template_grid_age_met_arrays(fsps_grid):
     """Return flattened age and metallicity arrays matching template order."""
     ages = np.asarray([m.get("tage_gyr", np.nan) for m in fsps_grid.template_meta], dtype=float)
@@ -410,52 +360,146 @@ def _template_grid_age_met_arrays(fsps_grid):
     return _np_to_jnp(ages), _np_to_jnp(mets)
 
 
-def _delayed_sfh_template_weights(fsps_grid, prior_config, host_amp):
-    """Build delayed-tau SFH host weights over the SSP template grid."""
+def _proxy_template_weights_from_host_state(fsps_grid, host_state):
+    """Map full JAXSEDFit SSP weights onto the legacy template grid for summaries."""
     template_age_gyr, template_lgmet = _template_grid_age_met_arrays(fsps_grid)
-    max_age = jnp.maximum(jnp.nanmax(template_age_gyr), 1e-3)
-    min_age = jnp.maximum(jnp.nanmin(template_age_gyr), 1e-3)
+    meta_lg_age = np.asarray(
+        [
+            m.get("dsps_lg_age_gyr", np.log10(max(m.get("tage_gyr", 1e-5), 1e-5)))
+            for m in fsps_grid.template_meta
+        ],
+        dtype=float,
+    )
+    meta_lgmet = np.asarray(
+        [m.get("dsps_lgmet", m.get("logzsol", 0.0)) for m in fsps_grid.template_meta],
+        dtype=float,
+    )
+    if meta_lg_age.size != fsps_grid.templates.shape[1] or not np.all(np.isfinite(meta_lg_age)):
+        meta_lg_age = np.log10(np.maximum(np.asarray(template_age_gyr, dtype=float), 1e-5))
+    if meta_lgmet.size != fsps_grid.templates.shape[1] or not np.all(np.isfinite(meta_lgmet)):
+        meta_lgmet = np.asarray(template_lgmet, dtype=float)
 
-    log_stellar_mass = _sample_log_stellar_mass(prior_config)
-    log_age_loc, log_age_scale = _cfg_mean_scale_from_prior_config(prior_config, "log_sfh_age_gyr", jnp.log(max_age), 1.0)
-    log_tau_loc, log_tau_scale = _cfg_mean_scale_from_prior_config(prior_config, "log_sfh_tau_gyr", np.log(1.0), 1.0)
-    log_sfh_age_gyr = numpyro.sample(
-        "log_sfh_age_gyr",
-        dist.TruncatedNormal(log_age_loc, log_age_scale, low=jnp.log(min_age), high=jnp.log(max_age * 1.01)),
-    )
-    log_sfh_tau_gyr = numpyro.sample(
-        "log_sfh_tau_gyr",
-        dist.TruncatedNormal(log_tau_loc, log_tau_scale, low=jnp.log(0.03), high=jnp.log(30.0)),
-    )
-    sfh_age_gyr = jnp.exp(log_sfh_age_gyr)
-    sfh_tau_gyr = jnp.exp(log_sfh_tau_gyr)
+    ssp_lg_age = np.asarray(host_state["ssp_lg_age_gyr"], dtype=float)
+    ssp_lgmet = np.asarray(host_state["ssp_lgmet"], dtype=float)
+    age_idx = np.asarray([int(np.argmin(np.abs(ssp_lg_age - x))) for x in meta_lg_age], dtype=int)
+    met_idx = np.asarray([int(np.argmin(np.abs(ssp_lgmet - x))) for x in meta_lgmet], dtype=int)
+    weights_frac = host_state["host_ssp_weights"][met_idx, age_idx]
+    return weights_frac / jnp.maximum(jnp.sum(weights_frac), 1e-30)
 
-    gal_lgmet = numpyro.sample(
-        "gal_lgmet",
-        dist.Normal(*_cfg_mean_scale_from_prior_config(prior_config, "gal_lgmet", 0.0, 0.5)),
-    )
-    gal_lgmet_scatter = numpyro.sample(
-        "gal_lgmet_scatter",
-        dist.HalfNormal(_cfg_halfnormal_from_prior_config(prior_config, "gal_lgmet_scatter", 0.2)),
-    )
-    mmr_logprior = _mass_metallicity_relation_logprior(log_stellar_mass, gal_lgmet, prior_config, template_lgmet)
-    numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
 
-    formation_age = sfh_age_gyr - template_age_gyr
-    age_weights = jnp.where(
-        (formation_age > 0.0) & (template_age_gyr <= sfh_age_gyr),
-        formation_age * jnp.exp(-formation_age / jnp.maximum(sfh_tau_gyr, 1e-6)),
-        0.0,
-    )
-    age_weights = age_weights / jnp.maximum(jnp.sum(age_weights), 1e-30)
-    met_weights = jnp.exp(-0.5 * ((template_lgmet - gal_lgmet) / jnp.maximum(gal_lgmet_scatter, 1e-4)) ** 2)
-    raw_weights = age_weights * met_weights
-    weights_frac = raw_weights / jnp.maximum(jnp.sum(raw_weights), 1e-30)
+def _sample_log_host_aperture_scale(prior_config):
+    """Return log aperture scale for the physical host spectrum.
 
-    numpyro.deterministic("sfh_age_gyr", sfh_age_gyr)
-    numpyro.deterministic("sfh_tau_gyr", sfh_tau_gyr)
-    numpyro.deterministic("mass_metallicity_relation_logprior", mmr_logprior)
+    ``log_host_aperture_scale`` multiplies the host luminosity-derived spectrum
+    after conversion to flux. The default deterministic value is 0, i.e.
+    aperture scale 1, which assumes the fitted spectrum captures the whole
+    galaxy light. Override this prior for fiber/slit spectra or known aperture
+    losses.
+    """
+    cfg = prior_config.get("log_host_aperture_scale", {"dist": "Delta", "value": 0.0})
+    if isinstance(cfg, dict):
+        dist_name = str(cfg.get("dist", "Delta")).lower()
+        if dist_name in {"delta", "fixed", "deterministic"}:
+            value = jnp.asarray(cfg.get("value", cfg.get("loc", 0.0)), dtype=jnp.float64)
+            return numpyro.deterministic("log_host_aperture_scale", value)
+        if dist_name in {"normal", "gaussian"}:
+            return numpyro.sample(
+                "log_host_aperture_scale",
+                dist.Normal(jnp.asarray(cfg.get("loc", 0.0)), jnp.asarray(cfg.get("scale", 1.0))),
+            )
+        if dist_name in {"uniform", "flat"}:
+            return numpyro.sample(
+                "log_host_aperture_scale",
+                dist.Uniform(jnp.asarray(cfg.get("low", -2.0)), jnp.asarray(cfg.get("high", 2.0))),
+            )
+    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
+        return numpyro.sample("log_host_aperture_scale", dist.Normal(jnp.asarray(cfg[0]), jnp.asarray(cfg[1])))
+    return numpyro.deterministic("log_host_aperture_scale", jnp.asarray(cfg, dtype=jnp.float64))
+
+
+def _delayed_sfh_template_weights_compat(fsps_grid, prior_config, host_amp):
+    """Compatibility delayed-tau path for tests and legacy grids without host_basis_jax."""
+    template_age_gyr, template_lgmet = _template_grid_age_met_arrays(fsps_grid)
+    templates = jnp.asarray(fsps_grid.templates.T, dtype=jnp.float64)
+
+    met_values = np.unique(np.asarray(template_lgmet, dtype=float))
+    age_values = np.unique(np.asarray(template_age_gyr, dtype=float))
+    while met_values.size < 3:
+        met_values = np.append(met_values, met_values[-1] + 0.5)
+    while age_values.size < 3:
+        age_values = np.append(age_values, age_values[-1] * 1.5 + 0.05)
+    met_values = np.asarray(met_values, dtype=float)
+    age_values = np.asarray(age_values, dtype=float)
+    n_met = int(met_values.size)
+    n_age = int(age_values.size)
+    met_index = np.searchsorted(met_values, np.asarray(template_lgmet, dtype=float))
+    age_index = np.searchsorted(age_values, np.asarray(template_age_gyr, dtype=float))
+
+    rest_llambda_np = np.zeros((n_met, n_age, templates.shape[1]), dtype=float)
+    rest_llambda_np[met_index, age_index, :] = np.asarray(templates, dtype=float)
+    host_basis = HostBasisJax(
+        ssp_lgmet=jnp.asarray(met_values, dtype=jnp.float64),
+        ssp_lg_age_gyr=jnp.log10(jnp.maximum(jnp.asarray(age_values, dtype=jnp.float64), 1e-5)),
+        rest_llambda=jnp.asarray(rest_llambda_np, dtype=jnp.float64),
+        surviving_frac_by_age=jnp.ones((n_age,), dtype=jnp.float64),
+        n_ly_per_msun=jnp.zeros((n_met, n_age), dtype=jnp.float64),
+        ly_lum_per_msun=jnp.zeros((n_met, n_age), dtype=jnp.float64),
+        gal_t_table=jnp.geomspace(
+            jnp.asarray(0.01, dtype=jnp.float64),
+            jnp.maximum(jnp.asarray(float(np.nanmax(age_values))), jnp.asarray(0.011, dtype=jnp.float64)),
+            max(16, n_age),
+        ),
+    )
+    host_state = build_jaxsedfit_host_state(
+        host_basis,
+        prior_config,
+        host_sfh_model="delayed",
+        t_obs_gyr=float(np.nanmax(age_values)),
+        redshift=float(prior_config.get("z_qso", 0.0)),
+    )
+    host_weights_grid = host_state["host_ssp_weights"]
+    weights_frac = host_weights_grid[met_index, age_index]
+    weights_frac = weights_frac / jnp.maximum(jnp.sum(weights_frac), 1e-30)
+
+    numpyro.deterministic("sfh_age_gyr", host_state["sfh_age_gyr"])
+    numpyro.deterministic("sfh_tau_gyr", host_state["sfh_tau_gyr"])
+    numpyro.deterministic("formed_stellar_mass", host_state["formed_mass"])
+    numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
+    numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     return host_amp * weights_frac, weights_frac
+
+
+def _delayed_sfh_host_spectrum(fsps_grid, prior_config, host_amp, z_qso):
+    """Return delayed-SFH host spectrum, weights, and proxy weights."""
+    host_basis = getattr(fsps_grid, "host_basis_jax", None)
+    if host_basis is None:
+        fsps_weights, fsps_weights_frac = _delayed_sfh_template_weights_compat(fsps_grid, prior_config, host_amp)
+        gal_intrinsic = jnp.dot(jnp.asarray(fsps_grid.templates, dtype=jnp.float64), fsps_weights)
+        return gal_intrinsic, fsps_weights, fsps_weights_frac
+
+    t_obs_gyr = getattr(fsps_grid, "t_obs_gyr", None)
+    if t_obs_gyr is None:
+        t_obs_gyr = float(np.nanmax(np.power(10.0, np.asarray(host_basis.ssp_lg_age_gyr, dtype=float))))
+    host_state = build_jaxsedfit_host_state(
+        host_basis,
+        prior_config,
+        host_sfh_model="delayed",
+        t_obs_gyr=float(t_obs_gyr),
+        redshift=float(np.asarray(z_qso)),
+    )
+    log_host_aperture_scale = _sample_log_host_aperture_scale(prior_config)
+    host_aperture_scale = jnp.exp(log_host_aperture_scale)
+    gal_intrinsic = host_aperture_scale * _host_luminosity_w_a_to_rest_flux_units(host_state["host_rest"], z_qso)
+    fsps_weights_frac = _proxy_template_weights_from_host_state(fsps_grid, host_state)
+    fsps_weights = fsps_weights_frac
+
+    numpyro.deterministic("sfh_age_gyr", host_state["sfh_age_gyr"])
+    numpyro.deterministic("sfh_tau_gyr", host_state["sfh_tau_gyr"])
+    numpyro.deterministic("formed_stellar_mass", host_state["formed_mass"])
+    numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
+    numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
+    numpyro.deterministic("host_aperture_scale", host_aperture_scale)
+    return gal_intrinsic, fsps_weights, fsps_weights_frac
 
 
 def _sample_from_prior_config(key, cfg):
@@ -506,6 +550,8 @@ class FSPSTemplateGrid:
     template_meta: List[Dict[str, float]]
     age_grid_gyr: np.ndarray
     logzsol_grid: np.ndarray
+    host_basis_jax: Any | None = None
+    t_obs_gyr: float | None = None
 
 
 def _map_logzsol_to_dsps_lgmet(logzsol_grid: Sequence[float], ssp_lgmet: np.ndarray) -> np.ndarray:
@@ -544,6 +590,8 @@ def build_fsps_template_grid(
     zcontinuous: int = 1,
     sfh: int = 0,
     dsps_ssp_fn: str = 'tempdata.h5',
+    z_qso: float = 0.0,
+    build_physical_host_basis: bool = True,
 ) -> FSPSTemplateGrid:
     """Build a host-galaxy SSP template matrix on the observed wavelength grid."""
     # Parameters kept for API compatibility.
@@ -586,12 +634,25 @@ def build_fsps_template_grid(
             })
 
     templates = np.column_stack(tmpl)
+    t_obs_gyr = _cosmic_age_gyr(z_qso)
+    host_basis_jax = (
+        build_host_basis_jax(
+            wave_out,
+            dsps_ssp_fn=dsps_ssp_fn,
+            t_obs_gyr=t_obs_gyr,
+        )
+        if build_physical_host_basis
+        else None
+    )
+
     return FSPSTemplateGrid(
         wave=wave_out,
         templates=templates,
         template_meta=meta,
         age_grid_gyr=np.asarray(age_grid_gyr, dtype=float),
         logzsol_grid=np.asarray(logzsol_grid, dtype=float),
+        host_basis_jax=host_basis_jax,
+        t_obs_gyr=t_obs_gyr,
     )
 
 
@@ -1197,7 +1258,12 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     if decompose_host:
         host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
         if host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
-            fsps_weights, fsps_weights_frac = _delayed_sfh_template_weights(fsps_grid, prior_config, host_amp)
+            gal_intrinsic, fsps_weights, fsps_weights_frac = _delayed_sfh_host_spectrum(
+                fsps_grid,
+                prior_config,
+                host_amp,
+                z_qso,
+            )
         elif host_sfh_model in {"flexible", "free", "template_weights", "ssp_weights"}:
             tau_host = numpyro.sample('tau_host', dist.HalfNormal(_cfg_halfnorm('tau_host')))
             tau_host_eff = jnp.maximum(tau_host, 1e-6)
@@ -1205,11 +1271,11 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             raw_w = numpyro.sample('fsps_weights_raw', dist.Normal(jnp.full((ntemp,), raw_w_loc), tau_host_eff))
             fsps_weights_frac = jax.nn.softmax(raw_w)
             fsps_weights = host_amp * fsps_weights_frac
+            gal_intrinsic = jnp.dot(templates, fsps_weights)
         else:
             raise ValueError("host_sfh_model must be one of: 'flexible', 'delayed'.")
         gal_v_kms = numpyro.sample('gal_v_kms', dist.Normal(*_cfg_norm('gal_v_kms')))
         gal_sigma_kms = numpyro.sample('gal_sigma_kms', dist.HalfNormal(_cfg_halfnorm('gal_sigma_kms')))
-        gal_intrinsic = jnp.dot(templates, fsps_weights)
         gal_model_intrinsic = _shift_and_broaden_single_spectrum_lnlam(lnwave, gal_intrinsic, gal_v_kms, gal_sigma_kms)
     else:
         fsps_weights_frac = jnp.zeros((ntemp,))

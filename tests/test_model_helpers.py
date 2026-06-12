@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
+from jaxsedfit.host import HostBasisJax
 
 import jaxqsofit.model as model_mod
 from jaxqsofit.defaults import build_default_prior_config
@@ -293,6 +294,85 @@ def test_qso_fsps_joint_model_supports_delayed_sfh_host_with_mzr():
     assert np.isfinite(float(tr["mass_metallicity_relation_logprior"]["value"]))
     assert np.isfinite(float(tr["sfh_age_gyr"]["value"]))
     assert np.isfinite(float(tr["sfh_tau_gyr"]["value"]))
+
+
+def test_delayed_sfh_host_uses_physical_stellar_mass_scaling():
+    wave = np.linspace(4000.0, 4100.0, 16)
+    flux = np.ones_like(wave)
+    err = np.full_like(wave, 0.1)
+    cfg = build_default_prior_config(flux)
+    cfg["host_sfh_model"] = "delayed"
+    cfg["mass_metallicity_relation"] = {"enabled": False}
+    cfg["log_host_aperture_scale"] = {"dist": "Normal", "loc": 0.0, "scale": 0.1}
+
+    class _Grid:
+        templates = np.zeros((wave.size, 4), dtype=float)
+        template_meta = [
+            {"tage_gyr": 0.1, "logzsol": -0.5, "dsps_lg_age_gyr": -1.0, "dsps_lgmet": -1.0},
+            {"tage_gyr": 1.0, "logzsol": -0.5, "dsps_lg_age_gyr": 0.0, "dsps_lgmet": -1.0},
+            {"tage_gyr": 0.1, "logzsol": 0.0, "dsps_lg_age_gyr": -1.0, "dsps_lgmet": -0.5},
+            {"tage_gyr": 1.0, "logzsol": 0.0, "dsps_lg_age_gyr": 0.0, "dsps_lgmet": -0.5},
+        ]
+        age_grid_gyr = np.array([0.1, 1.0])
+        logzsol_grid = np.array([-0.5, 0.0])
+        host_basis_jax = HostBasisJax(
+            ssp_lgmet=jnp.array([-1.0, -0.5, 0.0], dtype=jnp.float64),
+            ssp_lg_age_gyr=jnp.log10(jnp.array([0.1, 0.5, 1.0], dtype=jnp.float64)),
+            rest_llambda=jnp.ones((3, 3, wave.size), dtype=jnp.float64),
+            surviving_frac_by_age=jnp.ones((3,), dtype=jnp.float64),
+            n_ly_per_msun=jnp.zeros((3, 3), dtype=jnp.float64),
+            ly_lum_per_msun=jnp.zeros((3, 3), dtype=jnp.float64),
+            gal_t_table=jnp.geomspace(0.01, 1.2, 16),
+        )
+        t_obs_gyr = 1.2
+
+    base_params = {
+        "cont_norm": np.array(1.0),
+        "log_frac_host": np.array(0.0),
+        "PL_norm": np.array(0.0),
+        "PL_slope": np.array(0.0),
+        "log_sfh_age_gyr": np.log(1.0),
+        "log_sfh_tau_gyr": np.log(0.5),
+        "gal_lgmet": np.array(-0.5),
+        "gal_lgmet_scatter": np.array(0.2),
+        "log_host_aperture_scale": np.array(0.0),
+        "gal_v_kms": np.array(0.0),
+        "gal_sigma_kms": np.array(1.0),
+        "frac_jitter": np.array(0.0),
+        "add_jitter": np.array(0.0),
+    }
+
+    def _host_for_mass(log_stellar_mass):
+        params = dict(base_params, log_stellar_mass=np.array(log_stellar_mass))
+        tr = trace(substitute(seed(qso_fsps_joint_model, jax.random.PRNGKey(0)), data=params)).get_trace(
+            wave=wave,
+            flux=flux,
+            err=err,
+            conti_priors={},
+            tied_line_meta={"n_lines": 0},
+            fsps_grid=_Grid(),
+            fe_uv_wave=np.array([4000.0, 4100.0]),
+            fe_uv_flux=np.zeros(2),
+            fe_op_wave=np.array([4000.0, 4100.0]),
+            fe_op_flux=np.zeros(2),
+            use_lines=False,
+            prior_config=cfg,
+            decompose_host=True,
+            fit_pl=False,
+            fit_fe=False,
+            fit_bc=False,
+            fit_poly=False,
+            fit_reddening=False,
+            z_qso=0.1,
+        )
+        return np.asarray(tr["gal_model_intrinsic"]["value"], dtype=float)
+
+    host_low = _host_for_mass(8.0)
+    host_high = _host_for_mass(10.0)
+
+    mask = host_low > 0.0
+    assert np.any(mask)
+    assert np.allclose(host_high[mask] / host_low[mask], 100.0, rtol=1e-6)
 
 
 def test_qso_fsps_joint_model_fast_line_path_matches_component_split():

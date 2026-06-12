@@ -31,6 +31,7 @@ def test_build_default_prior_config_has_expected_keys():
     for k in required:
         assert k in cfg
     assert cfg["host_sfh_model"] == "delayed"
+    assert cfg["log_host_aperture_scale"] == {"dist": "Delta", "value": 0.0}
 
 
 def test_build_default_prior_config_scales_with_flux_median():

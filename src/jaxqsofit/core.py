@@ -766,6 +766,7 @@ class QSOFit:
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
             decompose_host=decompose_host,
+            z_qso=float(getattr(self, "z", 0.0)),
         )
         self.tied_line_meta = tied_line_meta
 
@@ -845,7 +846,7 @@ class QSOFit:
         return out_file
 
     @staticmethod
-    def _build_fsps_grid_for_fit(wave, age_grid_gyr, logzsol_grid, dsps_ssp_fn, decompose_host):
+    def _build_fsps_grid_for_fit(wave, age_grid_gyr, logzsol_grid, dsps_ssp_fn, decompose_host, z_qso=0.0):
         """Build the host-template grid only when host decomposition is enabled."""
         if decompose_host:
             return build_fsps_template_grid(
@@ -853,6 +854,7 @@ class QSOFit:
                 age_grid_gyr=age_grid_gyr,
                 logzsol_grid=logzsol_grid,
                 dsps_ssp_fn=dsps_ssp_fn,
+                z_qso=z_qso,
             )
 
         class _DummyFSPSGrid:
@@ -877,6 +879,8 @@ class QSOFit:
                 })
         grid.age_grid_gyr = age_grid_gyr
         grid.logzsol_grid = logzsol_grid
+        grid.host_basis_jax = None
+        grid.t_obs_gyr = None
         return grid
 
     @classmethod
@@ -1401,6 +1405,7 @@ class QSOFit:
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
             decompose_host=decompose_host,
+            z_qso=self.z,
         )
         self.tied_line_meta = tied_line_meta
 
@@ -1578,6 +1583,7 @@ class QSOFit:
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
             decompose_host=decompose_host,
+            z_qso=self.z,
         )
         self.tied_line_meta = tied_line_meta
 

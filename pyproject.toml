@@ -28,6 +28,7 @@ dependencies = [
   "optax",
   "h5py",
   "dsps",
+  "jaxsedfit",
   "dustmaps",
 ]
 
