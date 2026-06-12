@@ -81,6 +81,35 @@ def test_build_tied_line_meta_from_linelist_minimal():
         assert key in meta
 
 
+def test_build_tied_line_meta_uses_voff_as_log_wavelength_offset():
+    line_table = [
+        {
+            "lambda": 1549.06,
+            "linename": "CIV_br",
+            "compname": "CIV",
+            "ngauss": 1,
+            "inisca": 1.0,
+            "minsca": 0.0,
+            "maxsca": 1e3,
+            "inisig": 0.01,
+            "minsig": 0.001,
+            "maxsig": 0.05,
+            "voff": 0.015,
+            "vindex": 0,
+            "windex": 0,
+            "findex": 0,
+            "fvalue": 1.0,
+        }
+    ]
+    wave = np.linspace(1500.0, 1700.0, 200)
+
+    meta = build_tied_line_meta_from_linelist(line_table, wave)
+
+    assert meta["n_vgroups"] == 1
+    assert np.allclose(meta["dmu_min_group"], [-0.015])
+    assert np.allclose(meta["dmu_max_group"], [0.015])
+
+
 def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_luminosities():
     wave = np.linspace(2000.0, 6000.0, 32)
     flux = np.ones_like(wave)
