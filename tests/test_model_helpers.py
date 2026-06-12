@@ -8,6 +8,7 @@ import jaxqsofit.model as model_mod
 from jaxqsofit.defaults import build_default_prior_config
 from jaxqsofit.custom_components import make_custom_component
 from jaxqsofit.model import (
+    _fe_template_component,
     _host_redshift_prior_params,
     _extract_line_table_from_prior_config,
     _luminosity_distance_cm_jax,
@@ -28,6 +29,40 @@ def test_extract_line_table_from_prior_config_layouts():
     assert _extract_line_table_from_prior_config(cfg2) is table
     assert _extract_line_table_from_prior_config(cfg3) is table
     assert _extract_line_table_from_prior_config(cfg4) is table
+
+
+def test_fe_template_component_smoothly_bounds_fwhm_below_template_base():
+    wave = jnp.linspace(1900.0, 3100.0, 256)
+    wave_template = jnp.linspace(2000.0, 3000.0, 128)
+    flux_template = jnp.exp(-0.5 * ((wave_template - 2500.0) / 80.0) ** 2)
+
+    def component_sum(fwhm_kms):
+        return jnp.sum(
+            _fe_template_component(
+                wave,
+                wave_template,
+                flux_template,
+                norm=1.0,
+                fwhm_kms=fwhm_kms,
+                shift_frac=0.0,
+                base_fwhm_kms=2000.0,
+            )
+        )
+
+    component = _fe_template_component(
+        wave,
+        wave_template,
+        flux_template,
+        norm=1.0,
+        fwhm_kms=1500.0,
+        shift_frac=0.0,
+        base_fwhm_kms=2000.0,
+    )
+    grad = jax.grad(component_sum)(1500.0)
+
+    assert bool(jnp.all(jnp.isfinite(component)))
+    assert float(jnp.max(component)) > 0.0
+    assert bool(jnp.isfinite(grad))
 
 
 def test_build_tied_line_meta_from_linelist_minimal():

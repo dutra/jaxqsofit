@@ -266,7 +266,10 @@ def _fe_template_component(wave, wave_template, flux_template, norm, fwhm_kms, s
     flux_template = jnp.maximum(flux_template, 0.0)
     template_on_wave = jnp.interp(wave, wave_template, flux_template, left=0.0, right=0.0)
 
-    fwhm_eff = jnp.sqrt(jnp.maximum(fwhm_kms**2 - base_fwhm_kms**2, 910.0**2 - base_fwhm_kms**2))
+    min_fwhm_kms = 1.01 * base_fwhm_kms
+    transition_kms = jnp.maximum(0.01 * base_fwhm_kms, 10.0)
+    fwhm_total = min_fwhm_kms + transition_kms * jax.nn.softplus((fwhm_kms - min_fwhm_kms) / transition_kms)
+    fwhm_eff = jnp.sqrt(fwhm_total**2 - base_fwhm_kms**2)
     sigma_kms = fwhm_eff / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0)))
     v_kms = C_KMS * shift_frac
     lnwave = jnp.log(wave)
