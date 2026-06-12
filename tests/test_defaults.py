@@ -115,3 +115,16 @@ def test_default_line_table_contains_expanded_uv_complexes():
     assert by_name["CIII_br"]["ngauss"] == 2
     assert by_name["CIV_br"]["ngauss"] == 3
     assert by_name["Lya_br"]["ngauss"] == 3
+
+
+def test_optional_line_tables_do_not_duplicate_hei7065():
+    cfg = build_default_prior_config(
+        np.array([1.0, 2.0, 3.0], dtype=float),
+        include_elg_narrow_lines=True,
+        include_high_ionization_lines=True,
+    )
+    rows = cfg["line"]["table"]
+    hei7065 = [row for row in rows if row["linename"] == "HeI7065"]
+
+    assert len(hei7065) == 1
+    assert np.isclose(hei7065[0]["lambda"], 7067.17)

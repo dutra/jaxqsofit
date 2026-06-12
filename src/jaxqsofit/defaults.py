@@ -72,6 +72,11 @@ def _line_row(
     fvalue: float,
     vary: int = 1,
 ) -> Dict[str, Any]:
+    """Build one line-prior row.
+
+    Wavelength fields are rest-frame vacuum Angstroms, matching SDSS spectra
+    and the rest-frame wavelength grid used by the fitter.
+    """
     return {
         "lambda": lam,
         "compname": compname,
@@ -205,7 +210,6 @@ DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     _line_row(lam=5721.0, compname='FeVII', minwav=5660, maxwav=5785, linename='FeVII5721', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
     _line_row(lam=6087.0, compname='FeVII', minwav=6030, maxwav=6145, linename='FeVII6087', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
     _line_row(lam=6374.0, compname='FeX', minwav=6320, maxwav=6430, linename='FeX6374', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
-    _line_row(lam=7065.0, compname='HeI', minwav=7000, maxwav=7125, linename='HeI7065', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_elg_red, vindex=12, windex=12, findex=0, fvalue=0.001),
 ]
 
 
