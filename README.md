@@ -61,6 +61,7 @@ JAXQSOFit is designed around a **joint Bayesian model** of AGN and host componen
 - `extinction`
 - `dsps` ([GitHub](https://github.com/ArgonneCPAC/dsps))
 - `dustmaps` ([GitHub](https://github.com/gregreen/dustmaps))
+- `jaxsedfit` ([GitHub](https://github.com/burke86/jaxsedfit))
 
 ## Install
 
