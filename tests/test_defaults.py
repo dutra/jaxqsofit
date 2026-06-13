@@ -180,6 +180,25 @@ def test_optional_fixed_doublet_ratios_are_physical():
     )
 
 
+def test_default_oiii_doublets_are_tied_with_physical_ratio():
+    cfg = build_default_prior_config(np.array([1.0, 2.0, 3.0], dtype=float))
+    by_name = {row["linename"]: row for row in cfg["line"]["table"]}
+
+    assert by_name["OIII4959c"]["findex"] == by_name["OIII5007c"]["findex"]
+    assert by_name["OIII4959w"]["findex"] == by_name["OIII5007w"]["findex"]
+    assert by_name["OIII4959c"]["findex"] != by_name["OIII4959w"]["findex"]
+    assert np.isclose(
+        by_name["OIII5007c"]["fvalue"] * by_name["OIII5007c"]["lambda"]
+        / (by_name["OIII4959c"]["fvalue"] * by_name["OIII4959c"]["lambda"]),
+        2.98,
+    )
+    assert np.isclose(
+        by_name["OIII5007w"]["fvalue"] * by_name["OIII5007w"]["lambda"]
+        / (by_name["OIII4959w"]["fvalue"] * by_name["OIII4959w"]["lambda"]),
+        2.98,
+    )
+
+
 def test_combined_optional_config_preserves_oi_doublet_ratio():
     cfg = build_default_prior_config(
         np.array([1.0, 2.0, 3.0], dtype=float),

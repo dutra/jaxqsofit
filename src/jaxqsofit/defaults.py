@@ -124,10 +124,10 @@ DEFAULT_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     # Hbeta / [OIII]
     _line_row(lam=4862.68, compname='Hb', minwav=4640, maxwav=5100, linename='Hb_br', ngauss=2, inisig=inisig_broad, minsig=minsig_broad, maxsig=maxsig_broad, voff=voff_broad_balmer, vindex=0, windex=0, findex=0, fvalue=0.01),
     _line_row(lam=4862.68, compname='Hb', minwav=4640, maxwav=5100, linename='Hb_na', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_narrow, vindex=1, windex=1, findex=0, fvalue=0.002),
-    _line_row(lam=4960.30, compname='Hb', minwav=4640, maxwav=5100, linename='OIII4959c', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_narrow, vindex=1, windex=1, findex=0, fvalue=0.002),
-    _line_row(lam=5008.24, compname='Hb', minwav=4640, maxwav=5100, linename='OIII5007c', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_narrow, vindex=1, windex=1, findex=0, fvalue=0.004),
-    _line_row(lam=4960.30, compname='Hb', minwav=4640, maxwav=5100, linename='OIII4959w', inisig=inisig_oiii_wing, minsig=minsig_oiii_wing, maxsig=maxsig_oiii_wing, voff=voff_narrow, vindex=2, windex=2, findex=0, fvalue=0.001),
-    _line_row(lam=5008.24, compname='Hb', minwav=4640, maxwav=5100, linename='OIII5007w', inisig=inisig_oiii_wing, minsig=minsig_oiii_wing, maxsig=maxsig_oiii_wing, voff=voff_narrow, vindex=2, windex=2, findex=0, fvalue=0.002),
+    _line_row(lam=4960.30, compname='Hb', minwav=4640, maxwav=5100, linename='OIII4959c', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_narrow, vindex=1, windex=1, findex=3, fvalue=1.0),
+    _line_row(lam=5008.24, compname='Hb', minwav=4640, maxwav=5100, linename='OIII5007c', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_narrow, vindex=1, windex=1, findex=3, fvalue=_lnlam_peak_ratio_for_flux_ratio(2.98, 5008.24, 4960.30)),
+    _line_row(lam=4960.30, compname='Hb', minwav=4640, maxwav=5100, linename='OIII4959w', inisig=inisig_oiii_wing, minsig=minsig_oiii_wing, maxsig=maxsig_oiii_wing, voff=voff_narrow, vindex=2, windex=2, findex=4, fvalue=1.0),
+    _line_row(lam=5008.24, compname='Hb', minwav=4640, maxwav=5100, linename='OIII5007w', inisig=inisig_oiii_wing, minsig=minsig_oiii_wing, maxsig=maxsig_oiii_wing, voff=voff_narrow, vindex=2, windex=2, findex=4, fvalue=_lnlam_peak_ratio_for_flux_ratio(2.98, 5008.24, 4960.30)),
     # Higher-order Balmer
     _line_row(lam=4341.68, compname='Hg', minwav=4200, maxwav=4400, linename='Hg_br', inisig=inisig_broad, minsig=minsig_broad, maxsig=maxsig_broad, voff=voff_broad_balmer, vindex=0, windex=0, findex=0, fvalue=0.01),
     _line_row(lam=4341.68, compname='Hg', minwav=4200, maxwav=4400, linename='Hg_na', inisig=inisig_narrow, minsig=minsig_narrow, maxsig=maxsig_narrow, voff=voff_narrow, vindex=1, windex=1, findex=0, fvalue=0.002),
