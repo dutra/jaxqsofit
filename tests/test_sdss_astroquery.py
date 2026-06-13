@@ -84,6 +84,8 @@ def test_sdss_fit_wrms_below_threshold():
         pytest.skip('No SDSS spectra returned')
 
     from jaxqsofit import QSOFit, build_default_prior_config
+    if not os.path.isfile('tempdata.h5'):
+        pytest.skip('DSPS SSP template file tempdata.h5 is unavailable')
 
     hdu = spectra[0]
     data = hdu[1].data

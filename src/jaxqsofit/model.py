@@ -1572,8 +1572,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             sig = jnp.sqrt(psf_mag_errs[i] ** 2 + sigma_phot_extra ** 2)
             numpyro.sample(f'psf_mag_obs_{i}', dist.Normal(m_syn, sig), obs=psf_mags[i])
 
-    if emit_deterministics:
+    if emit_deterministics and not (fit_pl and fit_reddening):
         numpyro.deterministic('reddening_a2500', reddening_a2500)
+    if emit_deterministics:
         numpyro.deterministic('f_pl_model', pl_model)
         numpyro.deterministic('f_fe_mgii_model', fe_uv_model)
         numpyro.deterministic('f_fe_balmer_model', fe_op_model)

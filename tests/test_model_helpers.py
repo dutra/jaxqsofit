@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
+from types import SimpleNamespace
 from jaxsedfit.host import HostBasisJax
 
 import jaxqsofit.model as model_mod
@@ -39,6 +40,40 @@ def test_extract_line_table_from_prior_config_layouts():
 
 def test_package_enables_jax_x64_explicitly():
     assert jax.config.jax_enable_x64 is True
+
+
+def test_reddening_a2500_site_is_unique_when_sampled():
+    wave = np.linspace(2000.0, 3000.0, 8)
+    flux = np.ones_like(wave)
+    err = np.full_like(wave, 0.1)
+    prior_config = build_default_prior_config(flux)
+    prior_config["PL_pivot"] = 2500.0
+    prior_config["poly_pivot"] = 2500.0
+    fsps_grid = SimpleNamespace(templates=np.zeros((wave.size, 1)))
+    tied_line_meta = build_tied_line_meta_from_linelist([], wave)
+
+    model_trace = trace(seed(qso_fsps_joint_model, 0)).get_trace(
+        wave,
+        flux,
+        err,
+        None,
+        tied_line_meta,
+        fsps_grid,
+        np.array([2000.0, 3000.0]),
+        np.zeros(2),
+        np.array([2000.0, 3000.0]),
+        np.zeros(2),
+        use_lines=False,
+        prior_config=prior_config,
+        decompose_host=False,
+        fit_pl=True,
+        fit_fe=False,
+        fit_bc=False,
+        fit_poly=False,
+        fit_reddening=True,
+    )
+
+    assert model_trace["reddening_a2500"]["type"] == "sample"
 
 
 def test_fe_template_component_smoothly_bounds_fwhm_below_template_base():
