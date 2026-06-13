@@ -37,7 +37,7 @@ def test_sdss_name_fe_width_prior_wrms_below_threshold():
     if not spectra:
         pytest.skip("No SDSS spectra returned")
 
-    from jaxqsofit import QSOFit, build_default_prior_config
+    from jaxqsofit import JAXQSOFit, build_default_prior_config
 
     hdu = spectra[0]
     data = hdu[1].data
@@ -57,10 +57,10 @@ def test_sdss_name_fe_width_prior_wrms_below_threshold():
     prior_config["log_Fe_uv_FWHM"] = {"loc": np.log(100.0), "scale": 0.1}
     prior_config["log_Fe_op_FWHM"] = {"loc": np.log(100.0), "scale": 0.1}
 
-    q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=float(coord.ra.deg), dec=float(coord.dec.deg))
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=z, ra=float(coord.ra.deg), dec=float(coord.dec.deg))
+    q.config.inference.method = "optax+nuts"
     q.fit(
         deredden=False,
-        fit_method="optax+nuts",
         fit_lines=True,
         decompose_host=False,
         fit_fe=True,

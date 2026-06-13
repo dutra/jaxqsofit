@@ -1,31 +1,32 @@
-import numpyro
+from __future__ import annotations
 
-numpyro.enable_x64()
-
-from .core import QSOFit
-from .custom_components import (
-    CustomComponentSpec,
-    CustomLineComponentSpec,
-    make_custom_component,
-    make_custom_line_component,
-    make_template_component,
+from .config import (
+    ContinuumConfig,
+    HostConfig,
+    InferenceConfig,
+    LineConfig,
+    Observation,
+    OutputConfig,
+    PreprocessingConfig,
+    PSFPhotometryData,
+    FitConfig,
+    SpectroscopyData,
+    fit_config_from_mapping,
 )
-from .model import negative_gaussian_bal_component
-from .components import SpectralComponentConfig, evaluate_joint_spectral_components
-from .defaults import (
-    DEFAULT_LINE_CONFIG,
-    DEFAULT_LINE_PRIOR_ROWS,
-    build_default_bal_components,
-    build_default_prior_config,
-)
-from .mplstyle import style_path, use_style
-
-def load_from_samples(*args, **kwargs):
-    """Load a saved compressed HDF5 posterior bundle and return a QSOFit object."""
-    return QSOFit.load_from_samples(*args, **kwargs)
 
 __all__ = [
-    "QSOFit",
+    "JAXQSOFit",
+    "FitConfig",
+    "Observation",
+    "SpectroscopyData",
+    "PSFPhotometryData",
+    "PreprocessingConfig",
+    "ContinuumConfig",
+    "HostConfig",
+    "LineConfig",
+    "InferenceConfig",
+    "OutputConfig",
+    "fit_config_from_mapping",
     "load_from_samples",
     "CustomComponentSpec",
     "CustomLineComponentSpec",
@@ -42,3 +43,47 @@ __all__ = [
     "style_path",
     "use_style",
 ]
+
+
+def __getattr__(name):
+    """Lazily expose model-heavy public objects."""
+    if name == "JAXQSOFit":
+        from .core import JAXQSOFit
+
+        return JAXQSOFit
+    if name == "load_from_samples":
+        from .core import JAXQSOFit
+
+        return JAXQSOFit.load_from_samples
+    if name in {
+        "CustomComponentSpec",
+        "CustomLineComponentSpec",
+        "make_custom_component",
+        "make_custom_line_component",
+        "make_template_component",
+    }:
+        from . import custom_components as _custom_components
+
+        return getattr(_custom_components, name)
+    if name in {
+        "DEFAULT_LINE_CONFIG",
+        "DEFAULT_LINE_PRIOR_ROWS",
+        "build_default_bal_components",
+        "build_default_prior_config",
+    }:
+        from . import defaults as _defaults
+
+        return getattr(_defaults, name)
+    if name == "negative_gaussian_bal_component":
+        from .model import negative_gaussian_bal_component
+
+        return negative_gaussian_bal_component
+    if name in {"SpectralComponentConfig", "evaluate_joint_spectral_components"}:
+        from . import components as _components
+
+        return getattr(_components, name)
+    if name in {"style_path", "use_style"}:
+        from . import mplstyle as _mplstyle
+
+        return getattr(_mplstyle, name)
+    raise AttributeError(name)

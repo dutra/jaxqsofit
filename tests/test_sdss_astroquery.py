@@ -31,7 +31,7 @@ def test_sdss_fetch_and_qsofit_init():
     if not spectra:
         pytest.skip('No SDSS spectra returned')
 
-    from jaxqsofit import QSOFit
+    from jaxqsofit import JAXQSOFit
 
     hdu = spectra[0]
     data = hdu[1].data
@@ -47,7 +47,7 @@ def test_sdss_fetch_and_qsofit_init():
 
     z = float(xid[0]['z']) if 'z' in xid.colnames else 0.1
 
-    q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec)
 
     assert q.lam_in.size > 100
     assert np.isfinite(q.flux_in).any()
@@ -83,7 +83,7 @@ def test_sdss_fit_wrms_below_threshold():
     if not spectra:
         pytest.skip('No SDSS spectra returned')
 
-    from jaxqsofit import QSOFit, build_default_prior_config
+    from jaxqsofit import JAXQSOFit, build_default_prior_config
     if not os.path.isfile('tempdata.h5'):
         pytest.skip('DSPS SSP template file tempdata.h5 is unavailable')
 
@@ -101,10 +101,10 @@ def test_sdss_fit_wrms_below_threshold():
 
     z = float(xid[0]['z']) if 'z' in xid.colnames else 0.1
 
-    q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec)
+    q.config.inference.method = "optax+nuts"
     q.fit(
         deredden=False,
-        fit_method='optax+nuts',
         fit_lines=True,
         decompose_host=True,
         fit_fe=False,

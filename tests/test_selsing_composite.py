@@ -10,7 +10,7 @@ pytestmark = pytest.mark.integration
 
 def test_selsing_composite_fit_wrms_below_threshold(tmp_path: Path):
     """Fit Selsing composite and require Ly-alpha-masked normalized WRMS < threshold."""
-    from jaxqsofit import QSOFit, build_default_prior_config
+    from jaxqsofit import JAXQSOFit, build_default_prior_config
 
     url = "https://raw.githubusercontent.com/jselsing/QuasarComposite/master/Selsing2015.dat"
     dat_path = tmp_path / "Selsing2015.dat"
@@ -40,10 +40,10 @@ def test_selsing_composite_fit_wrms_below_threshold(tmp_path: Path):
 
     prior_config = build_default_prior_config(flux, pl_pivot=3000.0)
 
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.0)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.0)
+    q.config.inference.method = "optax+nuts"
     q.fit(
         deredden=False,
-        fit_method="optax+nuts",
         fit_lines=True,
         decompose_host=False,
         fit_pl=True,

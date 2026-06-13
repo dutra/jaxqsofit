@@ -12,11 +12,29 @@ Fitting interface
 .. autosummary::
    :toctree: generated
 
-   QSOFit
+   JAXQSOFit
    load_from_samples
 
-Configuration helpers
-~~~~~~~~~~~~~~~~~~~~~
+Configuration
+~~~~~~~~~~~~~
+
+.. autosummary::
+   :toctree: generated
+
+   FitConfig
+   Observation
+   SpectroscopyData
+   PSFPhotometryData
+   PreprocessingConfig
+   ContinuumConfig
+   HostConfig
+   LineConfig
+   InferenceConfig
+   OutputConfig
+   fit_config_from_mapping
+
+Model defaults
+~~~~~~~~~~~~~~
 
 .. autosummary::
    :toctree: generated
@@ -62,13 +80,80 @@ Core
 
 .. currentmodule:: jaxqsofit.core
 
-.. autoclass:: QSOFit
+.. autoclass:: JAXQSOFit
    :members:
    :undoc-members:
    :special-members: __init__
    :show-inheritance:
 
 .. autofunction:: jaxqsofit.load_from_samples
+
+Configuration
+-------------
+
+.. currentmodule:: jaxqsofit.config
+
+.. autoclass:: FitConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: Observation
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: SpectroscopyData
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: PSFPhotometryData
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: PreprocessingConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: ContinuumConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: HostConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: LineConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: InferenceConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: OutputConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autofunction:: fit_config_from_mapping
 
 Defaults
 --------
@@ -133,7 +218,7 @@ Plot Styling
 Model internals
 ---------------
 
-Most users should interact with :class:`jaxqsofit.QSOFit` and the configuration
+Most users should interact with :class:`jaxqsofit.JAXQSOFit` and the configuration
 helpers above. The lower-level model module exposes a few reusable utilities.
 
 .. currentmodule:: jaxqsofit.model

@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import jaxqsofit.core as coremod
 import jaxqsofit.model as modelmod
 from jaxqsofit import (
-    QSOFit,
+    JAXQSOFit,
     make_custom_component,
     make_template_component,
 )
@@ -141,7 +141,7 @@ def test_reconstruct_posterior_components_host_disabled_uses_dummy_grid(monkeypa
 
 def test_reconstruct_posterior_spectrum_passes_custom_components(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.wave = lam
     q.flux = flux
     q.fsps_grid = type("Grid", (), {"age_grid_gyr": np.array([1.0]), "logzsol_grid": np.array([0.0])})()
@@ -202,7 +202,7 @@ def test_make_custom_component_supports_general_function():
 
 def test_plot_fig_includes_custom_component_trace():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.wave = lam
     q.wave_prereduced = lam
     q.flux = flux
@@ -249,7 +249,7 @@ def test_plot_fig_includes_custom_component_trace():
 
 def test_plot_fig_negative_custom_component_sets_negative_ylim():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.wave = lam
     q.wave_prereduced = lam
     q.flux = flux

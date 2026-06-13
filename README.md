@@ -133,25 +133,40 @@ err = 1.0 / np.sqrt(tb["ivar"])          # 1-sigma
 # Prefer SDSS pipeline redshift if available, else supply your own z
 z = float(sp[2].data["z"][0])
 
-q = jaxqsofit.QSOFit(
-    lam, flux, err, z=z,
-    ra=float(coord.ra.deg), dec=float(coord.dec.deg),
+cfg = jaxqsofit.FitConfig(
+    observation=jaxqsofit.Observation(
+        object_id="ngc5548",
+        redshift=z,
+        ra=float(coord.ra.deg),
+        dec=float(coord.dec.deg),
+    ),
+    spectroscopy=jaxqsofit.SpectroscopyData(
+        wave_obs=lam,
+        fluxes=flux,
+        errors=err,
+    ),
+    continuum=jaxqsofit.ContinuumConfig(
+        fit_feii=False,
+        fit_balmer_continuum=True,
+    ),
+    host=jaxqsofit.HostConfig(
+        enabled=True,
+        dsps_ssp_fn="tempdata.h5",
+    ),
+    inference=jaxqsofit.InferenceConfig(
+        method="nuts",
+        num_warmup=300,
+        num_samples=600,
+        num_chains=1,
+    ),
+    output=jaxqsofit.OutputConfig(
+        plot_fig=True,
+        save_fig=False,
+    ),
 )
 
-q.fit(
-    deredden=True,
-    fit_lines=True,
-    decompose_host=True,
-    fit_fe=False,
-    fit_bc=True,
-    fit_poly=True,
-    dsps_ssp_fn="tempdata.h5",
-    nuts_warmup=300,
-    nuts_samples=600,
-    nuts_chains=1,
-    plot_fig=True,
-    save_fig=False,
-)
+q = jaxqsofit.JAXQSOFit(cfg)
+result = q.fit()
 ```
 
 ### Fast fitting option (Optax)
@@ -159,8 +174,8 @@ q.fit(
 If you want speed over full posterior sampling, use:
 
 ```python
+q.config.inference.method = "optax"
 q.fit(
-    fit_method="optax",
     optax_steps=1500,
     optax_lr=1e-2,
     plot_fig=True,
@@ -193,7 +208,7 @@ q.fit(prior_config=prior_config, fit_lines=False, fit_fe=False, fit_bc=True)
   - `prior_config["student_t_df"]` controls tail heaviness.
   - Lower `df` is more robust to outliers.
 
-## Outputs on `QSOFit` object
+## Outputs on `JAXQSOFit` object
 
 Common fitted arrays:
 

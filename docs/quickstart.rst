@@ -7,7 +7,16 @@ Minimal fitting example
 .. code-block:: python
 
    import numpy as np
-   from jaxqsofit import QSOFit
+   from jaxqsofit import (
+       ContinuumConfig,
+       HostConfig,
+       InferenceConfig,
+       JAXQSOFit,
+       Observation,
+       OutputConfig,
+       FitConfig,
+       SpectroscopyData,
+   )
 
    # Example arrays
    lam = np.linspace(3800.0, 9200.0, 2000)
@@ -15,18 +24,16 @@ Minimal fitting example
    err = np.full_like(flux, 0.5)
    z = 0.1
 
-   q = QSOFit(lam=lam, flux=flux, err=err, z=z)
-   q.fit(
-       fit_method='nuts',
-       fit_lines=True,
-       decompose_host=True,
-       fit_fe=True,
-       fit_bc=True,
-       fit_poly=True,
-       dsps_ssp_fn='tempdata.h5',
-       save_result=False,
-       plot_fig=True,
+   cfg = FitConfig(
+       observation=Observation(object_id='demo', redshift=z),
+       spectroscopy=SpectroscopyData(wave_obs=lam, fluxes=flux, errors=err),
+       continuum=ContinuumConfig(fit_feii=True, fit_balmer_continuum=True),
+       host=HostConfig(enabled=True, dsps_ssp_fn='tempdata.h5'),
+       inference=InferenceConfig(method='nuts'),
+       output=OutputConfig(save_result=False, plot_fig=True),
    )
+   q = JAXQSOFit(cfg)
+   result = q.fit()
 
 Fast mode
 ---------
@@ -35,14 +42,10 @@ For a fast MAP-style fit, use:
 
 .. code-block:: python
 
-   q.fit(
-       fit_method='optax',
-       optax_steps=1500,
-       optax_lr=1e-2,
-       dsps_ssp_fn='tempdata.h5',
-       save_result=False,
-       plot_fig=True,
-   )
+   q.config.inference.method = 'optax'
+   q.config.inference.map_steps = 1500
+   q.config.inference.learning_rate = 1e-2
+   result = q.fit()
 
 Hybrid mode
 -----------
@@ -51,10 +54,8 @@ Warm-start with Optax, then run NUTS:
 
 .. code-block:: python
 
-   q.fit(
-       fit_method='optax+nuts',
-       optax_steps=800,
-       nuts_warmup=200,
-       nuts_samples=400,
-       dsps_ssp_fn='tempdata.h5',
-   )
+   q.config.inference.method = 'optax+nuts'
+   q.config.inference.map_steps = 800
+   q.config.inference.num_warmup = 200
+   q.config.inference.num_samples = 400
+   result = q.fit()
