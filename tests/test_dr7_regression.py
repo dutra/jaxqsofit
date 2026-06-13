@@ -24,7 +24,7 @@ from astropy import units as u
 from astropy.cosmology import FlatLambdaCDM
 from astropy.io import fits
 
-from jaxqsofit import QSOFit
+from jaxqsofit import JAXQSOFit
 
 pytestmark = pytest.mark.integration
 
@@ -153,11 +153,10 @@ def test_dr7_broad_line_regression(tmp_path: Path):
 
         try:
             filename = f"{plate:04d}-{mjd}-{fiber:04d}"
-            q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec, filename=filename)
+            q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec, filename=filename)
             q.fit(
                 deredden=True,
-                fit_method="optax+nuts",
-                fit_lines=True,
+                        fit_lines=True,
                 decompose_host=True,
                 fit_fe=True,
                 fit_bc=True,

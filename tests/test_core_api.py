@@ -7,7 +7,7 @@ import pytest
 import jaxqsofit
 import jaxqsofit.core as coremod
 import jaxqsofit.model as modelmod
-from jaxqsofit import QSOFit, build_default_prior_config
+from jaxqsofit import JAXQSOFit, build_default_prior_config
 
 
 def _make_simple_spectrum(n=64):
@@ -26,7 +26,7 @@ def _make_wide_spectrum(n=256):
 
 def _build_bundle_source(tmp_path, filename, decompose_host):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(
+    q = JAXQSOFit.from_arrays(
         lam=lam,
         flux=flux,
         err=err,
@@ -80,7 +80,7 @@ def _build_bundle_source(tmp_path, filename, decompose_host):
 
 def test_init_err_optional_defaults_to_small_value():
     lam, flux, _ = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, z=0.1)
 
     assert q.err_in.shape == flux.shape
     assert np.allclose(q.err_in, 1e-6)
@@ -88,7 +88,7 @@ def test_init_err_optional_defaults_to_small_value():
 
 def test_init_psf_defaults_band_labels():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(
+    q = JAXQSOFit.from_arrays(
         lam=lam,
         flux=flux,
         err=err,
@@ -102,7 +102,7 @@ def test_init_psf_defaults_band_labels():
 
 def test_predictive_return_sites_include_requested_continuum_luminosities():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q._fit_prior_config = build_default_prior_config(flux)
     q.L_conti_wave = np.array([1350.0, 3000.0, 5100.0], dtype=float)
 
@@ -116,7 +116,7 @@ def test_predictive_return_sites_include_requested_continuum_luminosities():
 
 def test_prepare_psf_photometry_masks_invalid_and_builds_transmissions():
     lam, flux, err = _make_wide_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     mags, mag_errs, bands, filt_curves, use_psf = q._prepare_psf_photometry(
         wave_obs=lam,
@@ -136,7 +136,7 @@ def test_prepare_psf_photometry_masks_invalid_and_builds_transmissions():
 
 def test_prepare_psf_photometry_dereddens_psf_mags_bandpass_consistently():
     lam, flux, err = _make_wide_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q._fit_deredden = True
     q.ebv_mw = 0.12
 
@@ -163,7 +163,7 @@ def test_prepare_psf_photometry_dereddens_psf_mags_bandpass_consistently():
 
 def test_prepare_psf_photometry_zero_ebv_keeps_mags_unchanged():
     lam, flux, err = _make_wide_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q._fit_deredden = True
     q.ebv_mw = 0.0
 
@@ -185,7 +185,7 @@ def test_prepare_psf_photometry_zero_ebv_keeps_mags_unchanged():
 
 def test_de_redden_invalid_placeholder_coordinates_raise_clear_error():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     with pytest.raises(ValueError, match="fit\\(deredden=False\\)|valid sky coordinates"):
         q._validate_deredden_coordinates(ra=-999, dec=-999)
@@ -193,7 +193,7 @@ def test_de_redden_invalid_placeholder_coordinates_raise_clear_error():
 
 def test_build_fsps_grid_for_fit_skips_template_load_when_host_disabled(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     def _boom(**kwargs):
         raise AssertionError("FSPS templates should not be loaded when decompose_host=False")
@@ -220,7 +220,7 @@ def test_build_fsps_grid_for_fit_skips_template_load_when_host_disabled(monkeypa
 
 def test_fit_dispatch_nuts(monkeypatch):
     lam, flux, err = _make_wide_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     called = {'nuts': 0, 'kwargs': None}
 
@@ -230,9 +230,9 @@ def test_fit_dispatch_nuts(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_numpyro_fit', _stub_nuts)
 
+    q.config.inference.method = 'nuts'
     q.fit(
         deredden=False,
-        fit_method='nuts',
         plot_fig=False,
         save_result=False,
         prior_config=build_default_prior_config(flux),
@@ -250,7 +250,7 @@ def test_fit_dispatch_nuts(monkeypatch):
 
 def test_fit_dispatch_nuts_dereddens_psf_phot_when_enabled(monkeypatch):
     lam, flux, err = _make_wide_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1, ra=150.0, dec=2.0)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1, ra=150.0, dec=2.0)
 
     called = {'nuts': 0, 'kwargs': None}
 
@@ -267,9 +267,9 @@ def test_fit_dispatch_nuts_dereddens_psf_phot_when_enabled(monkeypatch):
     monkeypatch.setattr(q, 'run_fsps_numpyro_fit', _stub_nuts)
     monkeypatch.setattr(q, '_de_redden', _stub_deredden)
 
+    q.config.inference.method = 'nuts'
     q.fit(
         deredden=True,
-        fit_method='nuts',
         plot_fig=False,
         save_result=False,
         prior_config=build_default_prior_config(flux),
@@ -288,7 +288,7 @@ def test_fit_dispatch_nuts_dereddens_psf_phot_when_enabled(monkeypatch):
 
 def test_fit_dispatch_optax(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     called = {'optax': 0, 'kwargs': None}
 
@@ -298,9 +298,9 @@ def test_fit_dispatch_optax(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
+    q.config.inference.method = 'optax'
     q.fit(
         deredden=False,
-        fit_method='optax',
         plot_fig=False,
         plot_init=True,
         save_result=False,
@@ -314,7 +314,7 @@ def test_fit_dispatch_optax(monkeypatch):
 def test_fit_builds_default_priors_from_rest_frame_flux(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
     z = 2.0
-    q = QSOFit(lam=lam, flux=flux, err=err, z=z)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=z)
 
     called = {'kwargs': None}
 
@@ -323,9 +323,9 @@ def test_fit_builds_default_priors_from_rest_frame_flux(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
+    q.config.inference.method = 'optax'
     q.fit(
         deredden=False,
-        fit_method='optax',
         plot_fig=False,
         save_result=False,
         prior_config=None,
@@ -342,7 +342,7 @@ def test_fit_builds_default_priors_from_rest_frame_flux(monkeypatch):
 
 def test_fit_bal_appends_builtin_bal_components(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     called = {'optax': 0, 'kwargs': None}
 
@@ -352,9 +352,9 @@ def test_fit_bal_appends_builtin_bal_components(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
+    q.config.inference.method = 'optax'
     q.fit(
         deredden=False,
-        fit_method='optax',
         plot_fig=False,
         save_result=False,
         fit_bal=True,
@@ -368,7 +368,7 @@ def test_fit_bal_appends_builtin_bal_components(monkeypatch):
 
 def test_fit_dispatch_optax_nuts(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     called = {'optax_nuts': 0, 'kwargs': None}
 
@@ -378,9 +378,9 @@ def test_fit_dispatch_optax_nuts(monkeypatch):
 
     monkeypatch.setattr(q, 'run_fsps_optax_nuts_fit', _stub_optax_nuts)
 
+    q.config.inference.method = 'optax+nuts'
     q.fit(
         deredden=False,
-        fit_method='optax+nuts',
         plot_fig=False,
         plot_init=True,
         save_result=False,
@@ -393,15 +393,15 @@ def test_fit_dispatch_optax_nuts(monkeypatch):
 
 def test_fit_materializes_default_pl_pivot_to_numeric(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', lambda **kwargs: None)
 
     cfg = build_default_prior_config(flux)
     assert cfg["PL_pivot"] is None
+    q.config.inference.method = 'optax'
     q.fit(
         deredden=False,
-        fit_method='optax',
         plot_fig=False,
         save_result=False,
         prior_config=cfg,
@@ -417,13 +417,13 @@ def test_fit_materializes_default_pl_pivot_to_numeric(monkeypatch):
 
 def test_fit_preserves_explicit_pl_pivot_value(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', lambda **kwargs: None)
 
+    q.config.inference.method = 'optax'
     q.fit(
         deredden=False,
-        fit_method='optax',
         plot_fig=False,
         save_result=False,
         prior_config=build_default_prior_config(flux, pl_pivot=3000.0),
@@ -435,15 +435,15 @@ def test_fit_preserves_explicit_pl_pivot_value(monkeypatch):
 
 def test_fit_materializes_missing_pl_pivot_key(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', lambda **kwargs: None)
 
     cfg = build_default_prior_config(flux)
     cfg.pop("PL_pivot")
+    q.config.inference.method = 'optax'
     q.fit(
         deredden=False,
-        fit_method='optax',
         plot_fig=False,
         save_result=False,
         prior_config=cfg,
@@ -455,14 +455,14 @@ def test_fit_materializes_missing_pl_pivot_key(monkeypatch):
     assert isinstance(q._fit_prior_config["poly_pivot"], float)
 
 
-def test_fit_method_unknown_raises():
+def test_inference_method_unknown_raises():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
-    with pytest.raises(ValueError, match='Unknown fit_method'):
+    q.config.inference.method = 'not-a-method'
+    with pytest.raises(ValueError, match='Unknown inference method'):
         q.fit(
             deredden=False,
-            fit_method='not-a-method',
             plot_fig=False,
             save_result=False,
             prior_config=build_default_prior_config(flux),
@@ -483,15 +483,15 @@ def test_load_from_samples_roundtrip(tmp_path, monkeypatch):
     def _stub_plot_mcmc_diagnostics(self, **kwargs):
         called["plot_mcmc_diagnostics"] += 1
 
-    monkeypatch.setattr(QSOFit, "plot_fig", _stub_plot_fig)
-    monkeypatch.setattr(QSOFit, "plot_mcmc_diagnostics", _stub_plot_mcmc_diagnostics)
+    monkeypatch.setattr(JAXQSOFit, "plot_fig", _stub_plot_fig)
+    monkeypatch.setattr(JAXQSOFit, "plot_mcmc_diagnostics", _stub_plot_mcmc_diagnostics)
 
     loaded = jaxqsofit.load_from_samples(
         filename="unit_test_fit",
         output_path=str(tmp_path),
     )
 
-    assert isinstance(loaded, QSOFit)
+    assert isinstance(loaded, JAXQSOFit)
     assert loaded.filename == "unit_test_fit"
     assert loaded.output_path == str(tmp_path)
     assert np.allclose(loaded.lam_in, lam)
@@ -509,7 +509,7 @@ def test_load_from_samples_roundtrip(tmp_path, monkeypatch):
 
 def test_plot_trace_show_plot_false_skips_plt_show(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.numpyro_samples = {"PL_slope": np.array([-1.5, -1.4, -1.6])}
     q.save_fig = False
 
@@ -528,7 +528,7 @@ def test_plot_trace_show_plot_false_skips_plt_show(monkeypatch):
 
 def test_posterior_series_defaults_use_sampled_parameter_names():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.numpyro_samples = {
         "Fe_uv_norm": np.array([1.0, 1.1]),
         "log_Fe_op_over_uv": np.array([0.0, 0.1]),
@@ -547,7 +547,7 @@ def test_posterior_series_defaults_use_sampled_parameter_names():
 
 def test_plot_trace_show_plot_true_calls_plt_show(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.numpyro_samples = {"PL_slope": np.array([-1.5, -1.4, -1.6])}
     q.save_fig = False
 
@@ -566,7 +566,7 @@ def test_plot_trace_show_plot_true_calls_plt_show(monkeypatch):
 
 def test_plot_corner_show_plot_false_skips_plt_show(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.numpyro_samples = {
         "PL_slope": np.array([-1.5, -1.4, -1.6]),
         "cont_norm": np.array([1.0, 1.1, 0.9]),
@@ -588,7 +588,7 @@ def test_plot_corner_show_plot_false_skips_plt_show(monkeypatch):
 
 def test_plot_corner_show_plot_true_calls_plt_show(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.numpyro_samples = {
         "PL_slope": np.array([-1.5, -1.4, -1.6]),
         "cont_norm": np.array([1.0, 1.1, 0.9]),
@@ -610,7 +610,7 @@ def test_plot_corner_show_plot_true_calls_plt_show(monkeypatch):
 
 def test_plot_corner_reduces_tick_label_fontsize():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.numpyro_samples = {
         "PL_slope": np.array([-1.5, -1.4, -1.6]),
         "cont_norm": np.array([1.0, 1.1, 0.9]),
@@ -632,7 +632,7 @@ def test_plot_corner_reduces_tick_label_fontsize():
 
 def test_plot_corner_uses_light_curve_full_corner_rendering(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.numpyro_samples = {
         "PL_slope": np.array([-1.5, -1.4, -1.6]),
         "cont_norm": np.array([1.0, 1.1, 0.9]),
@@ -667,7 +667,7 @@ def test_plot_corner_uses_light_curve_full_corner_rendering(monkeypatch):
 
 def test_plot_mcmc_diagnostics_forwards_show_plot(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     called = {"trace": None, "corner": None}
 
@@ -679,8 +679,8 @@ def test_plot_mcmc_diagnostics_forwards_show_plot(monkeypatch):
         called["corner"] = kwargs
         return None
 
-    monkeypatch.setattr(QSOFit, "plot_trace", _stub_trace)
-    monkeypatch.setattr(QSOFit, "plot_corner", _stub_corner)
+    monkeypatch.setattr(JAXQSOFit, "plot_trace", _stub_trace)
+    monkeypatch.setattr(JAXQSOFit, "plot_corner", _stub_corner)
 
     q.plot_mcmc_diagnostics(show_plot=False)
 
@@ -694,12 +694,12 @@ def test_load_from_samples_roundtrip_without_filename(tmp_path, monkeypatch):
     q, _lam, _flux, _err = _build_bundle_source(tmp_path, "unit_test_fit_auto", decompose_host=False)
     q.save_posterior_bundle()
 
-    monkeypatch.setattr(QSOFit, "plot_fig", lambda self, **kwargs: None)
-    monkeypatch.setattr(QSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_fig", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
 
     loaded = jaxqsofit.load_from_samples(output_path=str(tmp_path))
 
-    assert isinstance(loaded, QSOFit)
+    assert isinstance(loaded, JAXQSOFit)
     assert loaded.filename == "unit_test_fit_auto"
     assert loaded.output_path == str(tmp_path)
 
@@ -730,8 +730,8 @@ def test_load_from_samples_roundtrip_with_host_enabled(tmp_path, monkeypatch):
 
     monkeypatch.setattr(coremod, "build_fsps_template_grid", _stub_template_grid)
     monkeypatch.setattr(modelmod, "build_fsps_template_grid", _stub_template_grid)
-    monkeypatch.setattr(QSOFit, "plot_fig", lambda self, **kwargs: None)
-    monkeypatch.setattr(QSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_fig", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
 
     loaded = jaxqsofit.load_from_samples(
         filename="unit_test_fit_host",
@@ -740,7 +740,7 @@ def test_load_from_samples_roundtrip_with_host_enabled(tmp_path, monkeypatch):
 
     recon = loaded.reconstruct_posterior_spectrum(n_draws=2)
 
-    assert isinstance(loaded, QSOFit)
+    assert isinstance(loaded, JAXQSOFit)
     assert loaded.pred_out["fsps_weights"].shape == (3, 4)
     assert np.all(np.isfinite(loaded.pred_out["fsps_weights"]))
     assert loaded.host.shape == lam.shape
@@ -749,7 +749,7 @@ def test_load_from_samples_roundtrip_with_host_enabled(tmp_path, monkeypatch):
 
 def test_save_posterior_bundle_excludes_figures_transient_and_duplicate_caches(tmp_path):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(
+    q = JAXQSOFit.from_arrays(
         lam=lam,
         flux=flux,
         err=err,
@@ -813,7 +813,7 @@ def test_save_posterior_bundle_excludes_figures_transient_and_duplicate_caches(t
 
 def test_save_posterior_bundle_normalizes_explicit_name_to_h5(tmp_path):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(
+    q = JAXQSOFit.from_arrays(
         lam=lam,
         flux=flux,
         err=err,
@@ -829,15 +829,15 @@ def test_save_posterior_bundle_normalizes_explicit_name_to_h5(tmp_path):
 
 
 def test_normalize_posterior_bundle_name_h5_policy():
-    assert QSOFit._normalize_posterior_bundle_name("manual_bundle") == "manual_bundle.h5"
-    assert QSOFit._normalize_posterior_bundle_name("manual_bundle.h5") == "manual_bundle.h5"
-    assert QSOFit._normalize_posterior_bundle_name("legacy_only.pkl") == "legacy_only.pkl.h5"
-    assert QSOFit._normalize_posterior_bundle_name("legacy_only.pkl.gz") == "legacy_only.pkl.gz.h5"
+    assert JAXQSOFit._normalize_posterior_bundle_name("manual_bundle") == "manual_bundle.h5"
+    assert JAXQSOFit._normalize_posterior_bundle_name("manual_bundle.h5") == "manual_bundle.h5"
+    assert JAXQSOFit._normalize_posterior_bundle_name("legacy_only.pkl") == "legacy_only.pkl.h5"
+    assert JAXQSOFit._normalize_posterior_bundle_name("legacy_only.pkl.gz") == "legacy_only.pkl.gz.h5"
 
 
 def test_reconstruct_posterior_spectrum_delegates_to_model_helper(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     q.wave = lam
     q.flux = flux
@@ -902,7 +902,7 @@ def test_reconstruct_posterior_spectrum_delegates_to_model_helper(monkeypatch):
 
 def test_reconstruct_posterior_spectrum_raises_on_fsps_weight_width_mismatch():
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     q.wave = lam
     q.flux = flux
@@ -934,8 +934,8 @@ def test_load_from_samples_raises_on_missing_fsps_metadata(tmp_path, monkeypatch
     with h5py.File(saved_path, "a") as h5f:
         del h5f["meta"]["_fit_dsps_ssp_fn"]
 
-    monkeypatch.setattr(QSOFit, "plot_fig", lambda self, **kwargs: None)
-    monkeypatch.setattr(QSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_fig", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
 
     with pytest.raises(ValueError, match="missing required FSPS metadata.*_fit_dsps_ssp_fn"):
         jaxqsofit.load_from_samples(
@@ -953,8 +953,8 @@ def test_load_from_samples_roundtrip_host_disabled_reconstructs_without_loading_
 
     monkeypatch.setattr(coremod, "build_fsps_template_grid", _boom)
     monkeypatch.setattr(modelmod, "build_fsps_template_grid", _boom)
-    monkeypatch.setattr(QSOFit, "plot_fig", lambda self, **kwargs: None)
-    monkeypatch.setattr(QSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_fig", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
 
     loaded = jaxqsofit.load_from_samples(
         filename="unit_test_host_disabled_recon",
@@ -971,7 +971,7 @@ def test_load_from_samples_roundtrip_host_disabled_reconstructs_without_loading_
 
 def test_component_fraction_at_wave_reconstruct_uses_rebuilt_draws(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
-    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
     q.wave = lam
 
     def _stub_reconstruct(self, **kwargs):
@@ -984,7 +984,7 @@ def test_component_fraction_at_wave_reconstruct_uses_rebuilt_draws(monkeypatch):
             "median": {},
         }
 
-    monkeypatch.setattr(QSOFit, "reconstruct_posterior_spectrum", _stub_reconstruct)
+    monkeypatch.setattr(JAXQSOFit, "reconstruct_posterior_spectrum", _stub_reconstruct)
 
     frac, err_out = q.component_fraction_at_wave(
         component="host",

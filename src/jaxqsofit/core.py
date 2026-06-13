@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from speclite import filters as speclite_filters
+from jaxsedfit.filters import load_filter_curves
 
 import jax
 import jax.numpy as jnp
@@ -21,6 +21,18 @@ from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 from numpyro.optim import optax_to_numpyro
 
+from .config import (
+    ContinuumConfig,
+    HostConfig,
+    InferenceConfig,
+    LineConfig,
+    Observation,
+    OutputConfig,
+    PreprocessingConfig,
+    PSFPhotometryData,
+    FitConfig,
+    SpectroscopyData,
+)
 from .custom_components import (
     CustomComponentSpec,
     CustomLineComponentSpec,
@@ -57,7 +69,7 @@ def _get_sdss_filters():
     """Load SDSS filter curves once and return a band->response mapping."""
     global _SDSS_FILTER_CACHE
     if _SDSS_FILTER_CACHE is None:
-        filters = speclite_filters.load_filters(*[f"sdss2010-{b}" for b in _SDSS_PSF_BANDS])
+        filters = load_filter_curves([f"{band}_sdss" for band in _SDSS_PSF_BANDS])
         _SDSS_FILTER_CACHE = {band: filt for band, filt in zip(_SDSS_PSF_BANDS, filters)}
     return _SDSS_FILTER_CACHE
 
@@ -106,76 +118,92 @@ def _mw_band_attenuation_factor(wave_obs, filt_trans, ebv, r_v=3.1):
         return 1.0
     return numer / denom
 
-class QSOFit:
+class JAXQSOFit:
     _POSTERIOR_BUNDLE_SUFFIX = ".h5"
 
-    def __init__(self, lam, flux, err=None, z=0.0, ra=-999, dec=-999, filename=None, output_path=None,
-                 wdisp=None, psf_mags=None, psf_mag_errs=None, psf_bands=None):
-        """Initialize a spectral fitting object with observed-frame inputs.
+    def __init__(self, config: FitConfig):
+        """Initialize a config-first JAXQSOFit spectral fitter."""
+        if not isinstance(config, FitConfig):
+            raise TypeError("JAXQSOFit expects a FitConfig. Build one with jaxqsofit.FitConfig(...).")
+        config.validate()
+        self.config = config
+        spec = config.spectroscopy
+        obs = config.observation
+        out = config.output
+        psf = config.psf_photometry
 
-        Parameters
-        ----------
-        lam : array-like
-            Observed-frame wavelength array in Angstrom.
-        flux : array-like
-            Observed-frame flux density array.
-        err : array-like or float or None, optional
-            Per-pixel 1-sigma uncertainty. If ``None``, a default of ``1e-6``
-            is used.
-        z : float, optional
-            Source redshift.
-        ra, dec : float, optional
-            Sky coordinates in degrees for Galactic dereddening.
-        filename : str or None, optional
-            Basename used for saving result tables/figures. If ``None``,
-            a filename is auto-generated from ``ra`` and ``dec``.
-        output_path : str or None, optional
-            Output directory for saved artifacts.
-        wdisp : array-like or None, optional
-            Optional wavelength dispersion vector (stored only).
-        psf_mags, psf_mag_errs : array-like or None, optional
-            Optional PSF photometry magnitudes and 1-sigma errors.
-        psf_bands : sequence of str or None, optional
-            Band labels associated with ``psf_mags``. If omitted, defaults to
-            the first N SDSS bands.
-
-        Notes
-        -----
-        Providing per-pixel `err` is strongly recommended for robust inference.
-        If `err` is not provided, a small default uncertainty (`1e-6`) is used;
-        in that case, fitted intrinsic-scatter terms absorb much of the noise model.
-
-        Use keyword arguments to avoid ambiguity (for example `z=...`).
-        """
-        self.lam_in = np.asarray(lam, dtype=np.float64)
-        self.flux_in = np.asarray(flux, dtype=np.float64)
-        if err is None:
+        self.lam_in = np.asarray(spec.wave_obs, dtype=np.float64)
+        self.flux_in = np.asarray(spec.fluxes, dtype=np.float64)
+        if spec.errors is None:
             self.err_in = np.full_like(self.flux_in, 1e-6, dtype=np.float64)
         else:
-            err_arr = np.asarray(err, dtype=np.float64)
+            err_arr = np.asarray(spec.errors, dtype=np.float64)
             if err_arr.ndim == 0:
                 self.err_in = np.full_like(self.flux_in, float(err_arr), dtype=np.float64)
             else:
                 self.err_in = err_arr
-        self.z = z
-        self.wdisp = wdisp
-        self.ra = ra
-        self.dec = dec
+        self.z = float(obs.redshift)
+        self.wdisp = spec.wavelength_dispersion
+        self.ra = -999 if obs.ra is None else float(obs.ra)
+        self.dec = -999 if obs.dec is None else float(obs.dec)
         self.install_path = os.path.dirname(os.path.abspath(__file__))
-        self.output_path = output_path
-        self.filename = self._resolve_filename(filename=filename, ra=ra, dec=dec)
-        self.psf_mags = None if psf_mags is None else np.asarray(psf_mags, dtype=np.float64)
-        self.psf_mag_errs = None if psf_mag_errs is None else np.asarray(psf_mag_errs, dtype=np.float64)
-        self.psf_mags_raw = None if psf_mags is None else np.asarray(psf_mags, dtype=np.float64)
-        self.psf_mag_errs_raw = None if psf_mag_errs is None else np.asarray(psf_mag_errs, dtype=np.float64)
+        self.output_path = out.output_path
+        self.filename = self._resolve_filename(filename=out.save_name or obs.object_id, ra=self.ra, dec=self.dec)
+        self.psf_mags = None if psf is None else np.asarray(psf.magnitudes, dtype=np.float64)
+        self.psf_mag_errs = None if psf is None else np.asarray(psf.magnitude_errors, dtype=np.float64)
+        self.psf_mags_raw = None if psf is None else np.asarray(psf.magnitudes, dtype=np.float64)
+        self.psf_mag_errs_raw = None if psf is None else np.asarray(psf.magnitude_errors, dtype=np.float64)
         self.psf_mags_dered = None
         self.psf_mag_errs_dered = None
-        self.psf_bands = None if psf_bands is None else list(psf_bands)
+        self.psf_bands = None if psf is None else list(psf.filter_names)
         if self.psf_bands is None and self.psf_mags is not None:
             self.psf_bands = ["u", "g", "r", "i", "z"][:len(self.psf_mags)]
         self.psf_filter_curves = None
         self.use_psf_phot = False
         self.ebv_mw = np.nan
+
+    @classmethod
+    def from_arrays(
+        cls,
+        *,
+        lam,
+        flux,
+        err=None,
+        z=0.0,
+        ra=None,
+        dec=None,
+        filename=None,
+        output_path=None,
+        wdisp=None,
+        psf_mags=None,
+        psf_mag_errs=None,
+        psf_bands=None,
+    ):
+        """Build a config-first fitter from raw arrays."""
+        psf = None
+        if psf_mags is not None and psf_mag_errs is not None:
+            psf = PSFPhotometryData(
+                magnitudes=psf_mags,
+                magnitude_errors=psf_mag_errs,
+                filter_names=tuple(psf_bands) if psf_bands is not None else ("u", "g", "r", "i", "z")[:len(psf_mags)],
+            )
+        cfg = FitConfig(
+            observation=Observation(
+                object_id=cls._resolve_filename(filename=filename, ra=-999 if ra is None else ra, dec=-999 if dec is None else dec),
+                redshift=float(z),
+                ra=None if ra in (None, -999) else float(ra),
+                dec=None if dec in (None, -999) else float(dec),
+            ),
+            spectroscopy=SpectroscopyData(
+                wave_obs=lam,
+                fluxes=flux,
+                errors=err,
+                wavelength_dispersion=wdisp,
+            ),
+            psf_photometry=psf,
+            output=OutputConfig(output_path=output_path, save_name=filename),
+        )
+        return cls(cfg)
 
     @staticmethod
     def _resolve_filename(filename=None, ra=-999, dec=-999):
@@ -239,7 +267,14 @@ class QSOFit:
         use_psf_phot=False,
         min_filter_coverage=0.97,
     ):
-        """Validate PSF photometry and interpolate filters onto the observed wavelength grid."""
+        """Validate PSF photometry and project filters onto the spectral grid.
+
+        JAXQSOFit only fits the spectrum. PSF photometry is therefore a
+        spectral-recalibration constraint, not a general SED likelihood. Bands
+        with no transmission overlap on the observed spectral wavelength grid
+        are dropped; use ``jaxsedfit`` for full joint spectrum + broadband SED
+        modeling.
+        """
         if psf_mags is not None:
             self.psf_mags = np.asarray(psf_mags, dtype=np.float64)
             self.psf_mags_raw = np.asarray(psf_mags, dtype=np.float64)
@@ -280,8 +315,8 @@ class QSOFit:
                 raise ValueError(f"Unsupported PSF photometry band '{band}'. Supported bands: {_SDSS_PSF_BANDS}.")
 
             filt = filters[band]
-            filt_wave = _filter_wave_to_angstrom_array(filt.wavelength)
-            filt_trans = np.asarray(filt.response, dtype=np.float64)
+            filt_wave = _filter_wave_to_angstrom_array(filt.wave)
+            filt_trans = np.asarray(filt.transmission, dtype=np.float64)
             trans_on_wave = np.interp(wave_obs, filt_wave, filt_trans, left=0.0, right=0.0)
 
             full_norm = float(np.trapezoid(np.clip(filt_trans, 0.0, None), filt_wave))
@@ -444,14 +479,14 @@ class QSOFit:
         if isinstance(value, CustomLineComponentSpec):
             return value.to_state()
         if isinstance(value, dict):
-            return {str(k): QSOFit._serialize_for_hdf5(v) for k, v in value.items()}
+            return {str(k): JAXQSOFit._serialize_for_hdf5(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
-            return type(value)(QSOFit._serialize_for_hdf5(v) for v in value)
+            return type(value)(JAXQSOFit._serialize_for_hdf5(v) for v in value)
         if isinstance(value, np.ndarray) and value.dtype == object:
             return {
                 "__ndarray_object__": True,
                 "shape": tuple(int(x) for x in value.shape),
-                "items": [QSOFit._serialize_for_hdf5(v) for v in value.ravel(order="C").tolist()],
+                "items": [JAXQSOFit._serialize_for_hdf5(v) for v in value.ravel(order="C").tolist()],
             }
         if isinstance(value, (np.ndarray, np.generic)):
             return np.asarray(value)
@@ -468,14 +503,14 @@ class QSOFit:
             if value.get("__custom_line_component__", False):
                 return CustomLineComponentSpec.from_state(value)
             if value.get("__ndarray_object__", False):
-                items = [QSOFit._deserialize_from_hdf5(v) for v in value["items"]]
+                items = [JAXQSOFit._deserialize_from_hdf5(v) for v in value["items"]]
                 arr = np.asarray(items, dtype=object)
                 return arr.reshape(tuple(value["shape"]))
-            return {k: QSOFit._deserialize_from_hdf5(v) for k, v in value.items()}
+            return {k: JAXQSOFit._deserialize_from_hdf5(v) for k, v in value.items()}
         if isinstance(value, list):
-            return [QSOFit._deserialize_from_hdf5(v) for v in value]
+            return [JAXQSOFit._deserialize_from_hdf5(v) for v in value]
         if isinstance(value, tuple):
-            return tuple(QSOFit._deserialize_from_hdf5(v) for v in value)
+            return tuple(JAXQSOFit._deserialize_from_hdf5(v) for v in value)
         return value
 
     @staticmethod
@@ -624,7 +659,7 @@ class QSOFit:
             "_fit_fit_reddening",
             "_fit_fit_poly_order",
             "_fit_mask_lya_forest",
-            "_fit_method",
+            "_fit_inference_method",
             "_fit_fsps_age_grid",
             "_fit_fsps_logzsol_grid",
             "_fit_fsps_template_norms",
@@ -899,7 +934,7 @@ class QSOFit:
         kwargs_plot=None,
         diagnostics_kwargs=None,
     ):
-        """Load a compressed HDF5 posterior bundle and return a QSOFit object."""
+        """Load a compressed HDF5 posterior bundle and return a JAXQSOFit object."""
         if save_name is not None:
             bundle_name = cls._normalize_posterior_bundle_name(save_name)
             bundle_dir = '.' if output_path is None else output_path
@@ -947,7 +982,7 @@ class QSOFit:
             else:
                 raise ValueError(f"Unsupported posterior bundle schema: {bundle_path}")
 
-        obj = cls(
+        obj = cls.from_arrays(
             lam=state["lam_in"],
             flux=state["flux_in"],
             err=state.get("err_in"),
@@ -982,145 +1017,170 @@ class QSOFit:
             obj.plot_mcmc_diagnostics(**diag_kwargs)
         return obj
 
-    def fit(self, name=None, deredden=True,
+    def fit(self, name=None, deredden=None,
             wave_range=None, wave_mask=None, save_fits_name=None,
-            fit_lines=True, save_result=True, plot_fig=True, save_fig=True,
-            show_plot=False,
-            decompose_host=True,
-            fit_pl=True,
-            fit_fe=True,
-            fit_bc=False,
-            fit_bal=False,
-            fit_poly=True,
-            fit_reddening=True,
-            fit_poly_order=2,
-            mask_lya_forest=True,
-            fit_method='optax+nuts',
+            fit_lines=None, save_result=None, plot_fig=None, save_fig=None,
+            show_plot=None,
+            decompose_host=None,
+            fit_pl=None,
+            fit_fe=None,
+            fit_bc=None,
+            fit_bal=None,
+            fit_poly=None,
+            fit_reddening=None,
+            fit_poly_order=None,
+            mask_lya_forest=None,
             verbose=True,
-            fsps_age_grid=(0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0),
-            fsps_logzsol_grid=(-1.0, -0.5, 0.0, 0.2),
+            fsps_age_grid=None,
+            fsps_logzsol_grid=None,
             host_sfh_model=None,
             prior_config=None,
-            dsps_ssp_fn='tempdata.h5',
-            nuts_warmup=50,
-            nuts_samples=50,
-            nuts_chains=1,
-            nuts_target_accept=0.9,
-            optax_steps=600,
-            optax_lr=1e-2,
+            dsps_ssp_fn=None,
+            nuts_warmup=None,
+            nuts_samples=None,
+            nuts_chains=None,
+            nuts_target_accept=None,
+            optax_steps=None,
+            optax_lr=None,
             psf_mags=None,
             psf_mag_errs=None,
             psf_bands=None,
-            use_psf_phot=False,
+            use_psf_phot=None,
             custom_components=None,
             custom_line_components=None,
-            plot_init=False,
+            plot_init=None,
             kwargs_plot=None):
-        """Run end-to-end preprocessing, fitting, and optional plotting/saving.
+        """Run preprocessing, inference, persistence, and plotting.
+
+        The primary API is configuration-first: construct ``JAXQSOFit`` with a
+        :class:`jaxqsofit.config.FitConfig`, then call ``fit()``. Keyword
+        arguments here are one-off overrides for the corresponding config
+        fields and are resolved before any preprocessing starts.
 
         Parameters
         ----------
         name : str or None, optional
-            Optional override basename used for figure/output naming.
+            Override ``config.output.save_name`` for output naming.
         deredden : bool, optional
-            If True, apply Galactic dereddening with dustmaps SFD.
+            Override ``config.observation.apply_mw_deredden``.
         wave_range : tuple[float, float] or None, optional
-            Rest-frame wavelength range to keep.
+            Override ``config.preprocessing.wave_range``.
         wave_mask : array-like or None, optional
-            Rest-frame wavelength intervals to mask.
+            Override ``config.preprocessing.wave_mask``.
         save_fits_name : str or None, optional
-            Basename for saved result table.
+            Override basename for saved result table.
         fit_lines : bool, optional
-            Enable/disable emission-line model.
+            Override ``config.lines.enabled``.
         save_result : bool, optional
-            If True, write summary results to CSV.
+            Override ``config.output.save_result``.
         plot_fig : bool, optional
-            If True, render decomposition figure.
+            Override ``config.output.plot_fig``.
         save_fig : bool, optional
-            If True, save rendered figures.
+            Override ``config.output.save_fig``.
         show_plot : bool, optional
-            If True, call ``plt.show()`` for the decomposition figure.
-            Default is ``False`` to avoid interactive pop-ups in notebook/pipeline runs.
+            Override ``config.output.show_plot``.
         decompose_host : bool, optional
-            Enable/disable host SPS decomposition.
-        fit_pl : bool, optional
-            Enable/disable AGN power-law component.
-        fit_fe : bool, optional
-            Enable/disable FeII components.
-        fit_bc : bool, optional
-            Enable/disable Balmer continuum.
-        fit_bal : bool, optional
-            If True, append built-in BAL trough custom components for
-            N V, Si IV, C IV, C III], FeLoBAL troughs near 2000/2200 A,
-            and Mg II.
-        fit_poly : bool, optional
-            Enable/disable multiplicative polynomial tilt.
+            Override ``config.host.enabled``.
+        fit_pl, fit_fe, fit_bc, fit_bal, fit_poly, fit_reddening : bool, optional
+            Override the matching ``config.continuum`` component switches.
         fit_poly_order : int, optional
-            Polynomial order for the multiplicative continuum tilt. Uses
-            coefficients ``poly_c1`` through ``poly_cN``.
-        fit_reddening : bool, optional
-            If True, apply a built-in smooth SMC-like reddening curve to the
-            nuclear continuum components and broad-line emission. The fitted
-            ``reddening_a2500`` parameter is ``A(2500 Angstrom)`` in magnitudes
-            for the default curve, not literal ``E(B-V)``.
+            Override ``config.continuum.polynomial_order``.
         mask_lya_forest : bool, optional
-            If True, mask pixels with rest-frame wavelength below Ly-alpha
-            (1215.67 Angstrom) before fitting.
-        fit_method : {'nuts', 'optax', 'optax+nuts'}, optional
-            Fitting backend. ``'optax'`` runs staged MAP optimization with
-            Optax/Adam and stores a point estimate, but does not produce
-            posterior samples. ``'nuts'`` runs NumPyro NUTS directly and stores
-            posterior samples. ``'optax+nuts'`` first runs the staged Optax
-            warm start and then initializes NUTS from that solution; this is
-            the default and is usually the most robust posterior-fitting mode.
+            Override ``config.preprocessing.mask_lya_forest``.
         verbose : bool, optional
             Verbose optimizer output where applicable.
-        fsps_age_grid : sequence of float, optional
-            SSP age grid in Gyr.
-        fsps_logzsol_grid : sequence of float, optional
-            SSP metallicity grid in log(Z/Zsun).
+        fsps_age_grid, fsps_logzsol_grid : sequence of float, optional
+            Override ``config.host`` SSP grid settings.
         host_sfh_model : {'flexible', 'delayed'} or None, optional
-            Host stellar-population parameterization. ``'flexible'`` uses the
-            historical free SSP-template weights. ``'delayed'`` uses a
-            delayed-exponential SFH over the same template grid and supports
-            ``log_stellar_mass`` plus optional ``mass_metallicity_relation`` or
-            ``mzr`` priors in ``prior_config``. If None, use the value already
-            present in ``prior_config`` or the default config.
+            Override ``config.host.sfh_model``.
         prior_config : dict or None, optional
-            Prior/config dictionary. If None, defaults are auto-built.
+            Override ``config.prior_config``.
         dsps_ssp_fn : str, optional
-            Path to DSPS SSP HDF5 template file.
-        nuts_warmup, nuts_samples : int, optional
-            NUTS warmup and posterior sample counts.
-        nuts_chains : int, optional
-            Number of MCMC chains.
-        nuts_target_accept : float, optional
-            Target accept probability for NUTS.
-        optax_steps : int, optional
-            Number of SVI/Optax warm-start steps.
-        optax_lr : float, optional
-            Learning rate for Optax Adam.
-        psf_mags, psf_mag_errs : array-like or None, optional
-            Optional PSF-aperture photometry magnitudes and 1-sigma errors.
+            Override ``config.host.dsps_ssp_fn``.
+        nuts_warmup, nuts_samples, nuts_chains, nuts_target_accept : optional
+            Override the corresponding ``config.inference`` NUTS settings.
+        optax_steps, optax_lr : optional
+            Override the corresponding ``config.inference`` Optax settings.
+        psf_mags, psf_mag_errs : array-like, optional
+            Override ``config.psf_photometry`` magnitudes and errors.
         psf_bands : sequence of str or None, optional
-            Band labels for ``psf_mags``. Defaults to SDSS ``ugriz`` order.
+            Override ``config.psf_photometry.filter_names``.
         use_psf_phot : bool, optional
-            If True, add a PSF-photometry likelihood term and infer PSF/fiber
-            scaling plus host leakage.
-        custom_components : sequence[CustomComponentSpec] or None, optional
-            Optional additive continuum components. Use
-            ``make_custom_component`` for general user-defined components or
-            ``make_template_component`` for a template convenience wrapper.
-        custom_line_components : sequence[CustomLineComponentSpec] or None, optional
-            Optional additive emission-line components. Each component provides
-            its own evaluator and is tagged as ``broad`` or ``narrow``.
+            Enable PSF-photometry likelihood. Defaults to True when
+            ``config.psf_photometry`` is present. This is a spectral
+            recalibration constraint; PSF bands must overlap the observed
+            spectral wavelength range. For full joint spectral + SED modeling,
+            use ``jaxsedfit``.
+        custom_components, custom_line_components : sequence or None, optional
+            Override ``config.lines`` custom component collections.
         plot_init : bool, optional
-            If True, plot the stage-1 Optax warm-start model immediately after
-            the continuum/host initialization stage. This diagnostic is only
-            available for ``fit_method='optax'`` and ``'optax+nuts'``.
+            Override ``config.inference.plot_init``.
         kwargs_plot : dict or None, optional
             Extra keyword arguments passed to :meth:`plot_fig`.
+
+        Returns
+        -------
+        dict
+            Contains the fitter object, posterior samples when available, the
+            saved posterior-bundle path when written, and the matplotlib figure
+            when plotted.
         """
+
+        cfg = self.config
+        obs_cfg = cfg.observation
+        prep_cfg = cfg.preprocessing
+        cont_cfg = cfg.continuum
+        host_cfg = cfg.host
+        line_cfg = cfg.lines
+        infer_cfg = cfg.inference
+        out_cfg = cfg.output
+        psf_cfg = cfg.psf_photometry
+
+        name = out_cfg.save_name if name is None else name
+        deredden = bool(obs_cfg.apply_mw_deredden if deredden is None else deredden)
+        wave_range = prep_cfg.wave_range if wave_range is None else wave_range
+        wave_mask = prep_cfg.wave_mask if wave_mask is None else wave_mask
+        mask_lya_forest = bool(prep_cfg.mask_lya_forest if mask_lya_forest is None else mask_lya_forest)
+
+        fit_lines = bool(line_cfg.enabled if fit_lines is None else fit_lines)
+        decompose_host = bool(host_cfg.enabled if decompose_host is None else decompose_host)
+        fit_pl = bool(cont_cfg.fit_power_law if fit_pl is None else fit_pl)
+        fit_fe = bool(cont_cfg.fit_feii if fit_fe is None else fit_fe)
+        fit_bc = bool(cont_cfg.fit_balmer_continuum if fit_bc is None else fit_bc)
+        fit_bal = bool(cont_cfg.fit_bal_absorption if fit_bal is None else fit_bal)
+        fit_poly = bool(cont_cfg.fit_polynomial_tilt if fit_poly is None else fit_poly)
+        fit_reddening = bool(cont_cfg.fit_reddening if fit_reddening is None else fit_reddening)
+        fit_poly_order = int(cont_cfg.polynomial_order if fit_poly_order is None else fit_poly_order)
+
+        method = str(infer_cfg.method)
+        fsps_age_grid = host_cfg.age_grid_gyr if fsps_age_grid is None else fsps_age_grid
+        fsps_logzsol_grid = host_cfg.logzsol_grid if fsps_logzsol_grid is None else fsps_logzsol_grid
+        host_sfh_model = host_cfg.sfh_model if host_sfh_model is None else host_sfh_model
+        dsps_ssp_fn = host_cfg.dsps_ssp_fn if dsps_ssp_fn is None else dsps_ssp_fn
+        nuts_warmup = int(infer_cfg.num_warmup if nuts_warmup is None else nuts_warmup)
+        nuts_samples = int(infer_cfg.num_samples if nuts_samples is None else nuts_samples)
+        nuts_chains = int(infer_cfg.num_chains if nuts_chains is None else nuts_chains)
+        nuts_target_accept = float(infer_cfg.target_accept_prob if nuts_target_accept is None else nuts_target_accept)
+        optax_steps = int(infer_cfg.map_steps if optax_steps is None else optax_steps)
+        optax_lr = float(infer_cfg.learning_rate if optax_lr is None else optax_lr)
+        plot_init = bool(infer_cfg.plot_init if plot_init is None else plot_init)
+
+        if prior_config is None:
+            prior_config = None if cfg.prior_config is None else dict(cfg.prior_config)
+        if psf_cfg is not None:
+            psf_mags = psf_cfg.magnitudes if psf_mags is None else psf_mags
+            psf_mag_errs = psf_cfg.magnitude_errors if psf_mag_errs is None else psf_mag_errs
+            psf_bands = psf_cfg.filter_names if psf_bands is None else psf_bands
+        use_psf_phot = bool((psf_cfg is not None) if use_psf_phot is None else use_psf_phot)
+
+        save_result = bool(out_cfg.save_result if save_result is None else save_result)
+        plot_fig = bool(out_cfg.plot_fig if plot_fig is None else plot_fig)
+        save_fig = bool(out_cfg.save_fig if save_fig is None else save_fig)
+        show_plot = bool(out_cfg.show_plot if show_plot is None else show_plot)
+        if self.output_path is None and out_cfg.output_path is not None:
+            self.output_path = out_cfg.output_path
+        custom_components = line_cfg.custom_components if custom_components is None else custom_components
+        custom_line_components = line_cfg.custom_line_components if custom_line_components is None else custom_line_components
 
         if kwargs_plot is None:
             kwargs_plot = {}
@@ -1140,7 +1200,7 @@ class QSOFit:
         self._fit_fit_reddening = bool(fit_reddening)
         self._fit_fit_poly_order = int(fit_poly_order)
         self._fit_mask_lya_forest = bool(mask_lya_forest)
-        self._fit_method = str(fit_method)
+        self._fit_inference_method = str(method)
         self._fit_fsps_age_grid = tuple(fsps_age_grid)
         self._fit_fsps_logzsol_grid = tuple(fsps_logzsol_grid)
         self._fit_host_sfh_model = None if host_sfh_model is None else str(host_sfh_model)
@@ -1239,7 +1299,7 @@ class QSOFit:
             use_psf_phot=use_psf_phot,
         )
 
-        if fit_method == 'nuts':
+        if method == 'nuts':
             self.run_fsps_numpyro_fit(
                 num_warmup=nuts_warmup,
                 num_samples=nuts_samples,
@@ -1264,7 +1324,7 @@ class QSOFit:
                 custom_components=self._fit_custom_components,
                 custom_line_components=self._fit_custom_line_components,
             )
-        elif fit_method == 'optax':
+        elif method == 'optax':
             self.run_fsps_optax_fit(
                 num_steps=optax_steps,
                 learning_rate=optax_lr,
@@ -1288,7 +1348,7 @@ class QSOFit:
                 custom_line_components=self._fit_custom_line_components,
                 plot_init=plot_init,
             )
-        elif fit_method == 'optax+nuts':
+        elif method == 'optax+nuts':
             self.run_fsps_optax_nuts_fit(
                 optax_steps=optax_steps,
                 optax_learning_rate=optax_lr,
@@ -1317,15 +1377,22 @@ class QSOFit:
                 plot_init=plot_init,
             )
         else:
-            raise ValueError(f"Unknown fit_method='{fit_method}'. Use 'nuts', 'optax', or 'optax+nuts'.")
+            raise ValueError(f"Unknown inference method='{method}'. Use 'nuts', 'optax', or 'optax+nuts'.")
 
+        posterior_bundle_path = None
         if save_result:
             self.save_result(self.conti_result, self.conti_result_type, self.conti_result_name,
                              self.line_result, self.line_result_type, self.line_result_name,
                              save_fits_name)
-            self.save_posterior_bundle()
+            posterior_bundle_path = self.save_posterior_bundle()
         if plot_fig:
             self.plot_fig(**kwargs_plot)
+        return {
+            "fitter": self,
+            "samples": getattr(self, "numpyro_samples", None),
+            "posterior_bundle_path": posterior_bundle_path,
+            "figure": getattr(self, "fig", None),
+        }
 
     def run_fsps_numpyro_fit(self, num_warmup=500, num_samples=1000, num_chains=1,
                              target_accept_prob=0.9,
@@ -2483,7 +2550,7 @@ class QSOFit:
             raise ValueError(
                 "Galactic dereddening requires valid sky coordinates: "
                 f"received ra={ra_f}, dec={dec_f}. "
-                "Pass real source coordinates to `QSOFit(...)` or call `fit(deredden=False)` "
+                "Pass real source coordinates in `FitConfig.observation` or call `fit(deredden=False)` "
                 "for synthetic data or spectra without sky positions."
             )
         return ra_f, dec_f
@@ -3117,8 +3184,8 @@ class QSOFit:
     @staticmethod
     def _filter_half_width_angstrom(filt):
         """Return an approximate half-width for a photometric filter."""
-        filt_wave = _filter_wave_to_angstrom_array(filt.wavelength)
-        filt_trans = np.asarray(filt.response, dtype=float)
+        filt_wave = _filter_wave_to_angstrom_array(filt.wave)
+        filt_trans = np.asarray(filt.transmission, dtype=float)
         support = filt_wave[filt_trans > 0.01 * np.nanmax(filt_trans)]
         if support.size >= 2:
             return 0.5 * float(support.max() - support.min())
@@ -3193,8 +3260,8 @@ class QSOFit:
             if filt is None or not np.isfinite(mag_err) or mag_err <= 0:
                 continue
 
-            filt_wave = _filter_wave_to_angstrom_array(filt.wavelength)
-            filt_trans = np.asarray(filt.response, dtype=float)
+            filt_wave = _filter_wave_to_angstrom_array(filt.wave)
+            filt_trans = np.asarray(filt.transmission, dtype=float)
             trans = np.interp(wave_obs, filt_wave, filt_trans, left=0.0, right=0.0)
             trans = np.clip(trans, 0.0, None)
             flam_obs_cgs = 1e-17 * flam_obs
