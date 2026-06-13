@@ -290,10 +290,11 @@ def test_fit_dispatch_optax(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
 
-    called = {'optax': 0}
+    called = {'optax': 0, 'kwargs': None}
 
     def _stub_optax(**kwargs):
         called['optax'] += 1
+        called['kwargs'] = kwargs
 
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
@@ -301,11 +302,13 @@ def test_fit_dispatch_optax(monkeypatch):
         deredden=False,
         fit_method='optax',
         plot_fig=False,
+        plot_init=True,
         save_result=False,
         prior_config=build_default_prior_config(flux),
     )
 
     assert called['optax'] == 1
+    assert called['kwargs']['plot_init'] is True
 
 
 def test_fit_builds_default_priors_from_rest_frame_flux(monkeypatch):
@@ -367,10 +370,11 @@ def test_fit_dispatch_optax_nuts(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
     q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
 
-    called = {'optax_nuts': 0}
+    called = {'optax_nuts': 0, 'kwargs': None}
 
     def _stub_optax_nuts(**kwargs):
         called['optax_nuts'] += 1
+        called['kwargs'] = kwargs
 
     monkeypatch.setattr(q, 'run_fsps_optax_nuts_fit', _stub_optax_nuts)
 
@@ -378,11 +382,13 @@ def test_fit_dispatch_optax_nuts(monkeypatch):
         deredden=False,
         fit_method='optax+nuts',
         plot_fig=False,
+        plot_init=True,
         save_result=False,
         prior_config=build_default_prior_config(flux),
     )
 
     assert called['optax_nuts'] == 1
+    assert called['kwargs']['plot_init'] is True
 
 
 def test_fit_materializes_default_pl_pivot_to_numeric(monkeypatch):

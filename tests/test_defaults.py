@@ -31,6 +31,13 @@ def test_build_default_prior_config_has_expected_keys():
     for k in required:
         assert k in cfg
     assert cfg["host_sfh_model"] == "delayed"
+    assert cfg["log_stellar_mass"] == {
+        "dist": "TruncatedNormal",
+        "loc": 9.0,
+        "scale": 0.75,
+        "low": 7.0,
+        "high": 12.0,
+    }
     assert cfg["log_host_aperture_scale"] == {"dist": "Delta", "value": 0.0}
 
 

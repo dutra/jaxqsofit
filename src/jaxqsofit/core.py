@@ -1009,6 +1009,7 @@ class QSOFit:
             use_psf_phot=False,
             custom_components=None,
             custom_line_components=None,
+            plot_init=False,
             kwargs_plot=None):
         """Run end-to-end preprocessing, fitting, and optional plotting/saving.
 
@@ -1106,6 +1107,10 @@ class QSOFit:
         custom_line_components : sequence[CustomLineComponentSpec] or None, optional
             Optional additive emission-line components. Each component provides
             its own evaluator and is tagged as ``broad`` or ``narrow``.
+        plot_init : bool, optional
+            If True, plot the stage-1 Optax warm-start model immediately after
+            the continuum/host initialization stage. This diagnostic is only
+            available for ``fit_method='optax'`` and ``'optax+nuts'``.
         kwargs_plot : dict or None, optional
             Extra keyword arguments passed to :meth:`plot_fig`.
         """
@@ -1192,6 +1197,7 @@ class QSOFit:
 
         if prior_config_input is None:
             prior_config = build_default_prior_config(self.flux)
+        prior_config["z_qso"] = float(self.z)
         if host_sfh_model is not None:
             prior_config["host_sfh_model"] = str(host_sfh_model)
         self._fit_host_sfh_model = str(prior_config.get("host_sfh_model", "flexible"))
@@ -1269,6 +1275,7 @@ class QSOFit:
                 use_psf_phot=use_psf_phot_use,
                 custom_components=self._fit_custom_components,
                 custom_line_components=self._fit_custom_line_components,
+                plot_init=plot_init,
             )
         elif fit_method == 'optax+nuts':
             self.run_fsps_optax_nuts_fit(
@@ -1296,6 +1303,7 @@ class QSOFit:
                 use_psf_phot=use_psf_phot_use,
                 custom_components=self._fit_custom_components,
                 custom_line_components=self._fit_custom_line_components,
+                plot_init=plot_init,
             )
         else:
             raise ValueError(f"Unknown fit_method='{fit_method}'. Use 'nuts', 'optax', or 'optax+nuts'.")
@@ -1492,6 +1500,61 @@ class QSOFit:
             decompose_host=decompose_host,
         )
 
+    def _plot_stage1_initialization(self, wave, flux, err, pred_out, samples):
+        """Plot and store the stage-1 Optax continuum/host warm-start model."""
+        wave = np.asarray(wave, dtype=float)
+        flux = np.asarray(flux, dtype=float)
+        err = np.asarray(err, dtype=float)
+        model = np.median(np.asarray(pred_out['model']), axis=0)
+        host = np.median(np.asarray(pred_out['gal_model']), axis=0)
+        pl = np.median(np.asarray(pred_out['f_pl_model']), axis=0)
+        line = np.median(np.asarray(pred_out['line_model']), axis=0)
+        continuum = np.median(np.asarray(pred_out['continuum_model']), axis=0)
+
+        valid = (
+            np.isfinite(wave)
+            & np.isfinite(flux)
+            & np.isfinite(err)
+            & np.isfinite(model)
+            & (err > 0)
+        )
+        n_params = len(samples)
+        dof = max(int(np.sum(valid)) - n_params, 1)
+        redchi2 = float(np.sum(((flux[valid] - model[valid]) / err[valid]) ** 2) / dof)
+
+        self.init_stage1_samples = samples
+        self.init_stage1_pred_out = pred_out
+        self.init_stage1_model = model
+        self.init_stage1_continuum_model = continuum
+        self.init_stage1_host_model = host
+        self.init_stage1_pl_model = pl
+        self.init_stage1_line_model = line
+        self.init_stage1_redchi2 = redchi2
+
+        fig, (ax, axr) = plt.subplots(
+            2,
+            1,
+            sharex=True,
+            figsize=(12, 6),
+            gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.05},
+        )
+        ax.plot(wave, flux, color='black', lw=0.8, alpha=0.8, label='data')
+        ax.plot(wave, model, color='blue', lw=1.6, label='stage 1 model')
+        ax.plot(wave, host, color='purple', lw=1.2, label='host galaxy')
+        ax.plot(wave, pl, color='orange', lw=1.2, label='power law')
+        if np.nanmax(np.abs(line)) > 0:
+            ax.plot(wave, line, color='lightskyblue', lw=1.0, label='lines')
+        ax.set_ylabel(r'$f_\lambda$')
+        ax.set_title(f'Stage 1 initialization (reduced chi2 = {redchi2:.2f})')
+        ax.legend(loc='best')
+
+        resid = flux - model
+        axr.axhline(0.0, color='black', lw=0.8, ls='--', alpha=0.6)
+        axr.plot(wave, resid, color='gray', lw=0.8, ls=':', alpha=0.9)
+        axr.set_ylabel('resid')
+        axr.set_xlabel(r'Rest Wavelength ($\AA$)')
+        plt.show()
+
     def run_fsps_optax_fit(self, num_steps=2000, learning_rate=1e-2,
                            age_grid_gyr=(0.1, 0.3, 1.0, 3.0, 10.0),
                            logzsol_grid=(-1.0, -0.5, 0.0, 0.2),
@@ -1510,7 +1573,8 @@ class QSOFit:
                            psf_filter_curves=None,
                            use_psf_phot=False,
                            custom_components=None,
-                           custom_line_components=None):
+                           custom_line_components=None,
+                           plot_init=False):
         """Fit a MAP approximation using staged SVI with an Optax optimizer.
 
         Parameters
@@ -1531,6 +1595,9 @@ class QSOFit:
             Component toggles for model blocks.
         fit_poly_order : int, optional
             Polynomial order for the multiplicative continuum tilt.
+        plot_init : bool, optional
+            If True, plot and store the stage-1 continuum/host warm-start
+            model before starting the full model stage.
         """
         wave = np.asarray(self.wave, dtype=float)
         flux = np.asarray(self.flux, dtype=float)
@@ -1627,11 +1694,53 @@ class QSOFit:
             )
             return svi, result
 
+        def _prior_field(key, field, default):
+            """Read a scalar field from a prior-config entry."""
+            cfg = prior_config.get(key, default)
+            if isinstance(cfg, dict):
+                value = cfg.get(field, cfg.get('value', cfg.get('loc', default)))
+            elif isinstance(cfg, (tuple, list)) and len(cfg) > 0:
+                value = cfg[0]
+            else:
+                value = cfg
+            try:
+                value = float(np.asarray(value, dtype=float))
+            except Exception:
+                value = float(default)
+            return value if np.isfinite(value) else float(default)
+
+        def _stage1_init_values():
+            """Build data-scale-aware constrained initial values for stage 1."""
+            cont_log_loc = _prior_field('log_cont_norm', 'loc', np.log(max(np.nanmedian(np.abs(flux)), 1e-8)))
+            cont_init = float(np.exp(cont_log_loc))
+            pl_init = _prior_field('PL_norm', 'scale', max(0.5 * np.nanmedian(np.abs(flux)), 1e-8))
+            log_frac_host_init = _prior_field('log_frac_host', 'loc', 0.0)
+
+            values = {
+                'gal_v_kms': 0.0,
+                'gal_sigma_kms': 150.0,
+                'cont_norm': max(cont_init, 1e-8),
+                'log_frac_host': log_frac_host_init,
+            }
+            if fit_pl:
+                values['PL_norm'] = max(pl_init, 1e-8)
+
+            host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
+            if decompose_host and host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
+                values['log_stellar_mass'] = _prior_field('log_stellar_mass', 'loc', 9.0)
+                values['log_sfh_age_gyr'] = _prior_field('log_sfh_age_gyr', 'loc', np.log(3.0))
+                values['log_sfh_tau_gyr'] = _prior_field('log_sfh_tau_gyr', 'loc', np.log(1.0))
+                values['gal_lgmet'] = _prior_field('gal_lgmet', 'loc', 0.0)
+                values['gal_lgmet_scatter'] = max(_prior_field('gal_lgmet_scatter', 'scale', 0.2), 1e-8)
+                values['log_host_aperture_scale'] = _prior_field('log_host_aperture_scale', 'value', 0.0)
+            return values
+
         # Stage 1: warm start on simpler landscape (continuum/host only).
         n1 = max(100, int(num_steps // 3))
+        stage1_init_values = _stage1_init_values()
         guide1 = AutoDelta(
             qso_fsps_joint_model,
-            init_loc_fn=init_to_value(values={'gal_v_kms': 0.0, 'gal_sigma_kms': 150.0}),
+            init_loc_fn=init_to_value(values=stage1_init_values),
         )
         svi1, res1 = _run_svi(
             guide1,
@@ -1646,6 +1755,55 @@ class QSOFit:
             decompose_host_i=decompose_host,
         )
         map1 = guide1.median(res1.params)
+        if plot_init:
+            stage1_samples = {k: np.asarray(v)[None, ...] for k, v in map1.items()}
+            pred1 = Predictive(
+                qso_fsps_joint_model,
+                posterior_samples={k: jnp.asarray(v) for k, v in stage1_samples.items()},
+                return_sites=[
+                    'f_pl_model',
+                    'gal_model',
+                    'line_model',
+                    'continuum_model',
+                    'model',
+                ],
+            )
+            pred1_out = pred1(
+                jax.random.PRNGKey(1),
+                wave=wave,
+                flux=None,
+                err=err,
+                conti_priors=conti_priors,
+                tied_line_meta=tied_line_meta,
+                fsps_grid=fsps_grid,
+                fe_uv_wave=self.fe_uv_wave,
+                fe_uv_flux=self.fe_uv_flux,
+                fe_op_wave=self.fe_op_wave,
+                fe_op_flux=self.fe_op_flux,
+                use_lines=False,
+                prior_config=prior_config,
+                decompose_host=decompose_host,
+                fit_pl=fit_pl,
+                fit_fe=False,
+                fit_bc=False,
+                fit_poly=False,
+                fit_reddening=False,
+                fit_poly_order=2,
+                z_qso=self.z,
+                psf_mags=psf_mags,
+                psf_mag_errs=psf_mag_errs,
+                psf_filter_curves=psf_filter_curves,
+                use_psf_phot=use_psf_phot,
+                custom_components=custom_components,
+                custom_line_components=custom_line_components,
+            )
+            self._plot_stage1_initialization(
+                wave=wave,
+                flux=flux,
+                err=err,
+                pred_out=pred1_out,
+                samples=stage1_samples,
+            )
 
         # Stage 2: full model initialized from stage-1 MAP for overlapping parameters.
         n2 = max(100, int(num_steps - n1))
@@ -1743,7 +1901,8 @@ class QSOFit:
                                 psf_filter_curves=None,
                                 use_psf_phot=False,
                                 custom_components=None,
-                                custom_line_components=None):
+                                custom_line_components=None,
+                                plot_init=False):
         """Warm-start with Optax MAP, then run NUTS as final inference.
 
         Parameters
@@ -1770,6 +1929,9 @@ class QSOFit:
             Component toggles for model blocks.
         fit_poly_order : int, optional
             Polynomial order for the multiplicative continuum tilt.
+        plot_init : bool, optional
+            If True, plot and store the stage-1 Optax warm-start model before
+            starting the full Optax stage and NUTS.
         """
         self.run_fsps_optax_fit(
             num_steps=optax_steps,
@@ -1792,6 +1954,7 @@ class QSOFit:
             use_psf_phot=use_psf_phot,
             custom_components=custom_components,
             custom_line_components=custom_line_components,
+            plot_init=plot_init,
         )
         init_values = getattr(self, 'optax_map_point', None)
         self.run_fsps_numpyro_fit(
