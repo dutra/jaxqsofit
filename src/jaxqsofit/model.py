@@ -734,99 +734,153 @@ def reconstruct_posterior_components(
     balmer_tau = np.asarray(samples.get('Balmer_Tau', np.full(n_total, 0.5)), dtype=float)[sl]
     balmer_vel = np.asarray(samples.get('Balmer_vel', np.full(n_total, 3000.0)), dtype=float)[sl]
 
-    component_draws = {
-        'host': np.zeros((n_use, wave_out.size), dtype=float),
-        'PL': np.zeros((n_use, wave_out.size), dtype=float),
-        'Fe_uv': np.zeros((n_use, wave_out.size), dtype=float),
-        'Fe_op': np.zeros((n_use, wave_out.size), dtype=float),
-        'Balmer_cont': np.zeros((n_use, wave_out.size), dtype=float),
-        'continuum': np.zeros((n_use, wave_out.size), dtype=float),
-    }
-    for comp in custom_components:
-        component_draws[comp.output_name] = np.zeros((n_use, wave_out.size), dtype=float)
     pl_pivot = float(np.asarray(_resolve_pl_pivot(wave_out, prior_config), dtype=float))
     reddening_ebv = np.asarray(samples.get('reddening_ebv', np.zeros(n_total)), dtype=float)[sl]
     reddening_uv_ref = float(prior_config.get('reddening_uv_ref', 2500.0))
     reddening_alpha = float(prior_config.get('reddening_alpha', 1.2))
+    if fit_poly and fit_poly_order > 0:
+        poly_coeffs = np.column_stack([
+            np.asarray(samples.get(f'poly_c{k}', np.zeros(n_total)), dtype=float)[sl]
+            for k in range(1, fit_poly_order + 1)
+        ])
+    else:
+        poly_coeffs = np.zeros((n_use, 0), dtype=float)
 
-    for i in range(n_use):
-        host_intrinsic = templates @ fsps_weights[i]
-        host_model = np.asarray(
-            _shift_and_broaden_single_spectrum_lnlam(lnwave, host_intrinsic, gal_v[i], gal_sigma[i]),
-            dtype=float,
+    wave_j = jnp.asarray(wave_out, dtype=jnp.float64)
+    lnwave_j = jnp.asarray(lnwave, dtype=jnp.float64)
+    templates_j = jnp.asarray(templates, dtype=jnp.float64)
+    fsps_weights_j = jnp.asarray(fsps_weights, dtype=jnp.float64)
+    poly_coeffs_j = jnp.asarray(poly_coeffs, dtype=jnp.float64)
+    poly_powers_j = None
+    if fit_poly and fit_poly_order > 0:
+        w0 = 0.5 * (wave_out[0] + wave_out[-1])
+        x = (wave_out - w0) / max(w0, 1.0)
+        poly_powers_j = jnp.asarray(
+            np.vstack([x ** k for k in range(1, fit_poly_order + 1)]),
+            dtype=jnp.float64,
         )
 
-        pl_model = np.asarray(
-            _powerlaw_jax(
-                wave_out,
-                pl_norm=pl_norm[i],
-                pl_slope=pl_slope[i],
-                pivot=pl_pivot,
-            ),
-            dtype=float,
+    def _one_builtin_components(
+        weights_i,
+        pl_norm_i,
+        pl_slope_i,
+        gal_v_i,
+        gal_sigma_i,
+        fe_uv_norm_i,
+        fe_op_norm_i,
+        fe_uv_fwhm_i,
+        fe_op_fwhm_i,
+        fe_uv_shift_i,
+        fe_op_shift_i,
+        balmer_norm_i,
+        balmer_tau_i,
+        balmer_vel_i,
+        reddening_ebv_i,
+        poly_coeffs_i,
+    ):
+        host_intrinsic = templates_j @ weights_i
+        host_model = _shift_and_broaden_single_spectrum_lnlam(lnwave_j, host_intrinsic, gal_v_i, gal_sigma_i)
+
+        pl_model = _powerlaw_jax(
+            wave_j,
+            pl_norm=pl_norm_i,
+            pl_slope=pl_slope_i,
+            pivot=pl_pivot,
         )
         if fit_reddening:
-            pl_model = pl_model * np.asarray(
-                _smc_like_reddening_jax(
-                    wave_out,
-                    reddening_ebv[i],
-                    uv_ref=reddening_uv_ref,
-                    alpha=reddening_alpha,
-                ),
-                dtype=float,
+            pl_model = pl_model * _smc_like_reddening_jax(
+                wave_j,
+                reddening_ebv_i,
+                uv_ref=reddening_uv_ref,
+                alpha=reddening_alpha,
             )
-        fe_uv_model = np.asarray(
-            _fe_template_component(wave_out, fe_uv_wave, fe_uv_flux, fe_uv_norm[i], fe_uv_fwhm[i], fe_uv_shift[i]),
-            dtype=float,
+        fe_uv_model = _fe_template_component(
+            wave_j,
+            jnp.asarray(fe_uv_wave, dtype=jnp.float64),
+            jnp.asarray(fe_uv_flux, dtype=jnp.float64),
+            fe_uv_norm_i,
+            fe_uv_fwhm_i,
+            fe_uv_shift_i,
         )
-        fe_op_model = np.asarray(
-            _fe_template_component(wave_out, fe_op_wave, fe_op_flux, fe_op_norm[i], fe_op_fwhm[i], fe_op_shift[i]),
-            dtype=float,
+        fe_op_model = _fe_template_component(
+            wave_j,
+            jnp.asarray(fe_op_wave, dtype=jnp.float64),
+            jnp.asarray(fe_op_flux, dtype=jnp.float64),
+            fe_op_norm_i,
+            fe_op_fwhm_i,
+            fe_op_shift_i,
         )
-        bc_model = np.asarray(
-            _balmer_continuum_jax(wave_out, balmer_norm[i], 15000.0, balmer_tau[i], balmer_vel[i]),
-            dtype=float,
-        )
-        custom_total = np.zeros_like(wave_out)
-        for comp in custom_components:
-            def _sample_value(samples_dict, key, default=0.0):
-                val = float(np.asarray(samples_dict.get(key, np.full(n_total, default)), dtype=float)[sl][i])
-                return val
+        bc_model = _balmer_continuum_jax(wave_j, balmer_norm_i, 15000.0, balmer_tau_i, balmer_vel_i)
 
-            custom_model = np.asarray(
-                _evaluate_custom_component_jax(wave_out, samples, comp, _sample_value),
-                dtype=float,
-            )
-            component_draws[comp.output_name][i] = custom_model
-            custom_total = custom_total + custom_model
-
-        poly_model = np.ones_like(wave_out)
+        poly_model = jnp.ones_like(wave_j)
         if fit_poly:
-            w0 = 0.5 * (wave_out[0] + wave_out[-1])
-            x = (wave_out - w0) / max(w0, 1.0)
-            poly_base = np.ones_like(wave_out)
-            for k in range(1, fit_poly_order + 1):
-                key = f'poly_c{k}'
-                if key in samples:
-                    poly_base = poly_base + float(np.asarray(samples[key], dtype=float)[sl][i]) * (x ** k)
-            poly_model = np.clip(poly_base, 0.2, 5.0)
+            poly_base = jnp.ones_like(wave_j)
+            if fit_poly_order > 0:
+                poly_base = poly_base + jnp.sum(poly_coeffs_i[:, None] * poly_powers_j, axis=0)
+            poly_model = jnp.clip(poly_base, 0.2, 5.0)
 
         host_model = host_model * poly_model
         pl_model = pl_model * poly_model
         fe_uv_model = fe_uv_model * poly_model
         fe_op_model = fe_op_model * poly_model
         bc_model = bc_model * poly_model
-        custom_total = custom_total * poly_model
-        for comp in custom_components:
-            component_draws[comp.output_name][i] = component_draws[comp.output_name][i] * poly_model
-        continuum_model = pl_model + fe_uv_model + fe_op_model + bc_model + custom_total + host_model
+        continuum_model = pl_model + fe_uv_model + fe_op_model + bc_model + host_model
+        return host_model, pl_model, fe_uv_model, fe_op_model, bc_model, continuum_model, poly_model
 
-        component_draws['host'][i] = host_model
-        component_draws['PL'][i] = pl_model
-        component_draws['Fe_uv'][i] = fe_uv_model
-        component_draws['Fe_op'][i] = fe_op_model
-        component_draws['Balmer_cont'][i] = bc_model
-        component_draws['continuum'][i] = continuum_model
+    (
+        host_draws,
+        pl_draws,
+        fe_uv_draws,
+        fe_op_draws,
+        bc_draws,
+        continuum_draws,
+        poly_draws,
+    ) = jax.vmap(_one_builtin_components)(
+        fsps_weights_j,
+        jnp.asarray(pl_norm, dtype=jnp.float64),
+        jnp.asarray(pl_slope, dtype=jnp.float64),
+        jnp.asarray(gal_v, dtype=jnp.float64),
+        jnp.asarray(gal_sigma, dtype=jnp.float64),
+        jnp.asarray(fe_uv_norm, dtype=jnp.float64),
+        jnp.asarray(fe_op_norm, dtype=jnp.float64),
+        jnp.asarray(fe_uv_fwhm, dtype=jnp.float64),
+        jnp.asarray(fe_op_fwhm, dtype=jnp.float64),
+        jnp.asarray(fe_uv_shift, dtype=jnp.float64),
+        jnp.asarray(fe_op_shift, dtype=jnp.float64),
+        jnp.asarray(balmer_norm, dtype=jnp.float64),
+        jnp.asarray(balmer_tau, dtype=jnp.float64),
+        jnp.asarray(balmer_vel, dtype=jnp.float64),
+        jnp.asarray(reddening_ebv, dtype=jnp.float64),
+        poly_coeffs_j,
+    )
+
+    component_draws = {
+        'host': np.asarray(host_draws, dtype=float),
+        'PL': np.asarray(pl_draws, dtype=float),
+        'Fe_uv': np.asarray(fe_uv_draws, dtype=float),
+        'Fe_op': np.asarray(fe_op_draws, dtype=float),
+        'Balmer_cont': np.asarray(bc_draws, dtype=float),
+        'continuum': np.asarray(continuum_draws, dtype=float),
+    }
+    poly_draws_np = np.asarray(poly_draws, dtype=float)
+    custom_total_draws = np.zeros((n_use, wave_out.size), dtype=float)
+    for comp in custom_components:
+        comp_draws = np.zeros((n_use, wave_out.size), dtype=float)
+        for i in range(n_use):
+            def _sample_value(samples_dict, key, default=0.0):
+                val = float(np.asarray(samples_dict.get(key, np.full(n_total, default)), dtype=float)[sl][i])
+                return val
+
+            comp_draw = np.asarray(
+                _evaluate_custom_component_jax(wave_out, samples, comp, _sample_value),
+                dtype=float,
+            ) * poly_draws_np[i]
+            comp_draws[i] = comp_draw
+            custom_total_draws[i] = custom_total_draws[i] + comp_draw
+        component_draws[comp.output_name] = comp_draws
+
+    if custom_components:
+        component_draws['continuum'] = component_draws['continuum'] + custom_total_draws
 
     output_draws = component_draws if return_components else {'continuum': component_draws['continuum']}
     return {
