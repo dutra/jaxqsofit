@@ -480,12 +480,13 @@ def _delayed_sfh_host_spectrum(fsps_grid, prior_config, host_amp, z_qso):
     t_obs_gyr = getattr(fsps_grid, "t_obs_gyr", None)
     if t_obs_gyr is None:
         t_obs_gyr = float(np.nanmax(np.power(10.0, np.asarray(host_basis.ssp_lg_age_gyr, dtype=float))))
+    static_redshift = float(prior_config.get("z_qso", 0.0))
     host_state = build_jaxsedfit_host_state(
         host_basis,
         prior_config,
         host_sfh_model="delayed",
         t_obs_gyr=float(t_obs_gyr),
-        redshift=float(np.asarray(z_qso)),
+        redshift=static_redshift,
     )
     log_host_aperture_scale = _sample_log_host_aperture_scale(prior_config)
     host_aperture_scale = jnp.exp(log_host_aperture_scale)
