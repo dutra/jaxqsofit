@@ -17,7 +17,8 @@ def test_build_default_prior_config_has_expected_keys():
         'PL_norm',
         'PL_slope',
         'PL_pivot',
-        'reddening_ebv',
+        'poly_pivot',
+        'reddening_a2500',
         'log_frac_host',
         'tau_host',
         'raw_w',
@@ -31,6 +32,7 @@ def test_build_default_prior_config_has_expected_keys():
     for k in required:
         assert k in cfg
     assert cfg["host_sfh_model"] == "delayed"
+    assert cfg["poly_pivot"] is None
     assert cfg["log_stellar_mass"] == {
         "dist": "TruncatedNormal",
         "loc": 9.0,
@@ -74,7 +76,16 @@ def test_build_default_prior_config_uses_explicit_dist_fields():
     assert cfg["host_redshift_prior"]["highz_scale_mult"] == 0.05
     assert cfg["host_redshift_prior"]["lowz_df"] == 3.0
     assert cfg["host_redshift_prior"]["highz_df"] == 20.0
+    assert cfg["log_Fe_uv_norm"]["dist"] == "LogNormal"
+    assert np.isclose(cfg["log_Fe_uv_norm"]["loc"], np.log(0.03 * 2.0))
+    assert cfg["log_Fe_uv_norm"]["scale"] == 1.0
+    assert cfg["log_Fe_op_over_uv"] == {"dist": "Normal", "loc": 0.0, "scale": 1.0}
     assert cfg["log_Fe_uv_FWHM"]["dist"] == "LogNormal"
+    assert np.isclose(cfg["log_Fe_uv_FWHM"]["loc"], np.log(3000.0))
+    assert cfg["log_Fe_uv_FWHM"]["scale"] == 0.5
+    assert cfg["log_Fe_op_FWHM"]["dist"] == "LogNormal"
+    assert np.isclose(cfg["log_Fe_op_FWHM"]["loc"], np.log(3000.0))
+    assert cfg["log_Fe_op_FWHM"]["scale"] == 0.5
     assert cfg["Fe_uv_shift"]["dist"] == "Normal"
     assert cfg["frac_jitter"]["dist"] == "HalfNormal"
     assert cfg["add_jitter"]["dist"] == "HalfNormal"
@@ -168,6 +179,25 @@ def test_optional_fixed_doublet_ratios_are_physical():
         high_ion_by_name["NeV3426_hi"]["fvalue"] * high_ion_by_name["NeV3426_hi"]["lambda"]
         / (high_ion_by_name["NeV3346"]["fvalue"] * high_ion_by_name["NeV3346"]["lambda"]),
         2.7,
+    )
+
+
+def test_default_oiii_doublets_are_tied_with_physical_ratio():
+    cfg = build_default_prior_config(np.array([1.0, 2.0, 3.0], dtype=float))
+    by_name = {row["linename"]: row for row in cfg["line"]["table"]}
+
+    assert by_name["OIII4959c"]["findex"] == by_name["OIII5007c"]["findex"]
+    assert by_name["OIII4959w"]["findex"] == by_name["OIII5007w"]["findex"]
+    assert by_name["OIII4959c"]["findex"] != by_name["OIII4959w"]["findex"]
+    assert np.isclose(
+        by_name["OIII5007c"]["fvalue"] * by_name["OIII5007c"]["lambda"]
+        / (by_name["OIII4959c"]["fvalue"] * by_name["OIII4959c"]["lambda"]),
+        2.98,
+    )
+    assert np.isclose(
+        by_name["OIII5007w"]["fvalue"] * by_name["OIII5007w"]["lambda"]
+        / (by_name["OIII4959w"]["fvalue"] * by_name["OIII4959w"]["lambda"]),
+        2.98,
     )
 
 

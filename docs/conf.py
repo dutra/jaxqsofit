@@ -24,6 +24,17 @@ extensions = [
 
 autosummary_generate = True
 autodoc_member_order = 'bysource'
+autodoc_class_signature = 'mixed'
+autodoc_typehints = 'description'
+autodoc_preserve_defaults = True
+autodoc_default_options = {
+    'members': True,
+    'undoc-members': True,
+    'show-inheritance': True,
+    'member-order': 'bysource',
+    'special-members': '__init__',
+    'exclude-members': '__weakref__',
+}
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 
@@ -34,6 +45,8 @@ autodoc_mock_imports = [
     'numpyro',
     'optax',
     'dsps',
+    'diffmah',
+    'diffstar',
     'dustmaps',
     'extinction',
 ]

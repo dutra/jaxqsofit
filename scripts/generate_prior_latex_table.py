@@ -274,8 +274,12 @@ def _build_main_rows(
         add("PL_norm", _dist_label(prior["PL_norm"]), "AGN power-law continuum amplitude.")
     if "PL_slope" in sample_sites:
         add("PL_slope", _dist_label(prior["PL_slope"]), "AGN power-law spectral slope.")
-    if "reddening_ebv" in sample_sites:
-        add("reddening_ebv", _dist_label(prior["reddening_ebv"]), "SMC-like AGN reddening amplitude.")
+    if "reddening_a2500" in sample_sites:
+        add(
+            "reddening_a2500",
+            _dist_label(prior["reddening_a2500"]),
+            "SMC-like AGN attenuation amplitude $A(2500\\,\\AA)$ in magnitudes.",
+        )
 
     if "Fe_uv_norm" in sample_sites:
         add("Fe_uv_norm", _dist_label(prior["log_Fe_uv_norm"]), "UV Fe template normalization.")

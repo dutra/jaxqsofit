@@ -410,6 +410,9 @@ def test_fit_materializes_default_pl_pivot_to_numeric(monkeypatch):
     pivot = q._fit_prior_config["PL_pivot"]
     assert isinstance(pivot, float)
     assert np.isfinite(pivot)
+    poly_pivot = q._fit_prior_config["poly_pivot"]
+    assert isinstance(poly_pivot, float)
+    assert np.isfinite(poly_pivot)
 
 
 def test_fit_preserves_explicit_pl_pivot_value(monkeypatch):
@@ -427,6 +430,7 @@ def test_fit_preserves_explicit_pl_pivot_value(monkeypatch):
     )
 
     assert q._fit_prior_config["PL_pivot"] == 3000.0
+    assert isinstance(q._fit_prior_config["poly_pivot"], float)
 
 
 def test_fit_materializes_missing_pl_pivot_key(monkeypatch):
@@ -448,6 +452,7 @@ def test_fit_materializes_missing_pl_pivot_key(monkeypatch):
     pivot = q._fit_prior_config["PL_pivot"]
     assert isinstance(pivot, float)
     assert np.isfinite(pivot)
+    assert isinstance(q._fit_prior_config["poly_pivot"], float)
 
 
 def test_fit_method_unknown_raises():
@@ -519,6 +524,25 @@ def test_plot_trace_show_plot_false_skips_plt_show(monkeypatch):
 
     assert fig is not None
     assert called["show"] == 0
+
+
+def test_posterior_series_defaults_use_sampled_parameter_names():
+    lam, flux, err = _make_simple_spectrum()
+    q = QSOFit(lam=lam, flux=flux, err=err, z=0.1)
+    q.numpyro_samples = {
+        "Fe_uv_norm": np.array([1.0, 1.1]),
+        "log_Fe_op_over_uv": np.array([0.0, 0.1]),
+        "Balmer_vel": np.array([3000.0, 3200.0]),
+        "Fe_op_norm": np.array([99.0, 99.0]),
+        "Balmer_Te": np.array([15000.0, 15000.0]),
+    }
+
+    labels = [name for name, _ in q._posterior_series()]
+
+    assert "log_Fe_op_over_uv" in labels
+    assert "Balmer_vel" in labels
+    assert "Fe_op_norm" not in labels
+    assert "Balmer_Te" not in labels
 
 
 def test_plot_trace_show_plot_true_calls_plt_show(monkeypatch):
@@ -871,6 +895,8 @@ def test_reconstruct_posterior_spectrum_delegates_to_model_helper(monkeypatch):
     assert captured["n_draws"] == 2
     assert captured["return_components"] is False
     assert np.isclose(np.min(captured["wave_out"]), 2500.0)
+    dln = np.diff(np.log(captured["wave_out"]))
+    assert np.allclose(dln, dln[0], rtol=1e-6)
     assert np.allclose(out["wave"], captured["wave_out"])
 
 

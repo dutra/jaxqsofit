@@ -22,7 +22,15 @@ from .model import (
 
 @dataclass(frozen=True)
 class SpectralComponentConfig:
-    """Reusable jaxqsofit spectral-component settings for external joint models."""
+    """Reusable jaxqsofit spectral-component settings for external joint models.
+
+    ``evaluate_joint_spectral_components`` operates in f_nu units because the
+    external SED continuum is passed as ``continuum_mjy``. Internally generated
+    Fe II and Balmer-continuum templates are native f_lambda shapes; before they
+    are added to the mJy continuum, their shapes are converted to f_nu by
+    multiplying by ``(lambda / pivot)^2``. The sampled Fe/Balmer normalizations
+    therefore remain mJy-like amplitudes at the configured pivot.
+    """
 
     use_lines: bool = True
     use_feii: bool = False
@@ -45,6 +53,8 @@ class SpectralComponentConfig:
     line_velocity_sigma_kms: float = 500.0
     feii_fwhm_kms_default: float = 3000.0
     balmer_velocity_kms_default: float = 3000.0
+    feii_fnu_pivot_rest: float | None = None
+    balmer_fnu_pivot_rest: float | None = 3000.0
 
 
 def _as_config(config: SpectralComponentConfig | None) -> SpectralComponentConfig:
@@ -222,6 +232,23 @@ def _evaluate_simple_line_components(wave_rest, continuum_model, cfg: SpectralCo
     }
 
 
+def _flambda_shape_to_fnu_mjy_shape(wave_rest, flambda_shape, pivot_rest):
+    """Convert a relative f_lambda component shape to an f_nu shape.
+
+    The conversion is normalized at ``pivot_rest`` so component amplitudes stay
+    in the same mJy-like scale. This preserves the external API while avoiding
+    adding f_lambda-shaped Fe/Balmer templates directly to an f_nu continuum.
+    """
+    wave_rest = jnp.asarray(wave_rest, dtype=jnp.float64)
+    flambda_shape = jnp.asarray(flambda_shape, dtype=jnp.float64)
+    if pivot_rest is None:
+        pivot = jnp.nanmedian(wave_rest)
+    else:
+        pivot = jnp.asarray(float(pivot_rest), dtype=jnp.float64)
+    pivot = jnp.maximum(pivot, 1.0e-8)
+    return flambda_shape * jnp.square(jnp.clip(wave_rest, 1.0e-8, None) / pivot)
+
+
 def evaluate_joint_spectral_components(
     wave_obs,
     redshift,
@@ -243,6 +270,10 @@ def evaluate_joint_spectral_components(
     continuum_mjy
         External continuum prediction on ``wave_obs`` in mJy. In a joint
         grahspj fit this is the shared AGN+host continuum.
+    feii_template_wave_rest, feii_template_flux
+        Rest-frame Fe II template sampled as an f_lambda-shaped relative
+        spectrum. The evaluated Fe II component is converted to f_nu shape
+        before being added to the mJy continuum.
 
     Returns
     -------
@@ -291,13 +322,18 @@ def evaluate_joint_spectral_components(
             dist.LogNormal(jnp.log(max(cfg.feii_fwhm_kms_default, 1.0)), 0.4),
         )
         feii_shift = numpyro.sample(f"{site_prefix}_feii_shift", dist.Normal(0.0, 0.01))
-        feii_model = _fe_template_component(
+        feii_flambda_shape = _fe_template_component(
             wave_rest,
             jnp.asarray(np.asarray(feii_template_wave_rest, dtype=float)),
             jnp.asarray(np.asarray(feii_template_flux, dtype=float)),
             feii_norm,
             feii_fwhm,
             feii_shift,
+        )
+        feii_model = _flambda_shape_to_fnu_mjy_shape(
+            wave_rest,
+            feii_flambda_shape,
+            cfg.feii_fnu_pivot_rest,
         )
 
     balmer_model = jnp.zeros_like(wave_obs)
@@ -308,7 +344,12 @@ def evaluate_joint_spectral_components(
             f"{site_prefix}_balmer_vel",
             dist.LogNormal(jnp.log(max(cfg.balmer_velocity_kms_default, 1.0)), 0.4),
         )
-        balmer_model = _balmer_continuum_jax(wave_rest, balmer_norm, 15000.0, balmer_tau, balmer_vel)
+        balmer_flambda_shape = _balmer_continuum_jax(wave_rest, balmer_norm, 15000.0, balmer_tau, balmer_vel)
+        balmer_model = _flambda_shape_to_fnu_mjy_shape(
+            wave_rest,
+            balmer_flambda_shape,
+            cfg.balmer_fnu_pivot_rest,
+        )
 
     total = continuum_model + line_model + feii_model + balmer_model
     numpyro.deterministic(f"{site_prefix}_continuum_model", continuum_model)

@@ -65,6 +65,7 @@ Core
 .. autoclass:: QSOFit
    :members:
    :undoc-members:
+   :special-members: __init__
    :show-inheritance:
 
 .. autofunction:: jaxqsofit.load_from_samples
@@ -91,9 +92,15 @@ Custom Components
 
 .. autoclass:: CustomComponentSpec
    :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
 
 .. autoclass:: CustomLineComponentSpec
    :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
 
 .. autofunction:: make_custom_component
 
@@ -108,6 +115,9 @@ Components
 
 .. autoclass:: SpectralComponentConfig
    :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
 
 .. autofunction:: evaluate_joint_spectral_components
 

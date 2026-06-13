@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import extinction
+import numpyro
+
+numpyro.enable_x64()
 
 import jax
 import jax.numpy as jnp
-import numpyro
 import numpyro.distributions as dist
 
 from dsps import load_ssp_templates
@@ -26,8 +27,6 @@ from .custom_components import (
     normalize_custom_components,
     normalize_custom_line_components,
 )
-
-warnings.filterwarnings("ignore")
 
 C_KMS = 299792.458
 _SFD_QUERY_CACHE: Dict[str, Any] = {}
@@ -74,6 +73,20 @@ def _resolve_pl_pivot(wave, prior_config):
         pivot = prior_config.get("PL_pivot", None)
         if pivot is not None:
             return jnp.maximum(jnp.asarray(float(pivot)), 1e-8)
+    return _spectrum_center_pivot(wave)
+
+
+def _resolve_poly_pivot(wave, prior_config, *, require_configured=False):
+    """Return the polynomial pivot wavelength used by the fitted model."""
+    if prior_config is not None:
+        pivot = prior_config.get("poly_pivot", None)
+        if pivot is not None:
+            return jnp.maximum(jnp.asarray(float(pivot)), 1e-8)
+    if require_configured:
+        raise ValueError(
+            "Posterior reconstruction with fitted polynomial coefficients requires "
+            "prior_config['poly_pivot'] from the fitted wavelength grid."
+        )
     return _spectrum_center_pivot(wave)
 
 
@@ -210,13 +223,18 @@ def negative_gaussian_bal_component(wave, params, metadata):
     return -depth * jnp.exp(-0.5 * jnp.abs(x) ** shape_power)
 
 
-def _smc_like_reddening_jax(wave, ebv, uv_ref=2500.0, alpha=1.2):
-    """Return a smooth SMC-like attenuation curve."""
-    ebv = jnp.maximum(jnp.asarray(ebv), 0.0)
+def _smc_like_reddening_jax(wave, a_uv, uv_ref=2500.0, alpha=1.2):
+    """Return a smooth SMC-like attenuation curve.
+
+    The amplitude is normalized at ``uv_ref``: ``a_uv`` is
+    :math:`A(\\mathrm{uv\\_ref})` in magnitudes, not a literal
+    color excess.
+    """
+    a_uv = jnp.maximum(jnp.asarray(a_uv), 0.0)
     uv_ref = jnp.maximum(jnp.asarray(uv_ref), 1e-8)
     alpha = jnp.asarray(alpha)
     k_lambda = (jnp.clip(wave, 1e-8, None) / uv_ref) ** (-alpha)
-    return 10.0 ** (-0.4 * ebv * k_lambda)
+    return 10.0 ** (-0.4 * a_uv * k_lambda)
 
 
 def _many_gauss_lnlam(lnlam, amps, mus, sigs):
@@ -254,16 +272,13 @@ def _synth_ab_mag_from_grid(wave_obs, flam_obs, filt_trans):
 
 def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms):
     """Apply LOS velocity shift and Gaussian broadening to one spectrum."""
-    dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512)
 
     wave = jnp.exp(lnwave)
     shift_ln = v_kms / C_KMS
     shifted_wave = jnp.exp(lnwave - shift_ln)
     shifted = jnp.interp(shifted_wave, wave, spectrum, left=0.0, right=0.0)
-    return _convolve_same_length(shifted, kern)
+    return _convolve_velocity_space(lnwave, shifted, sigma_ln, radius_mult=5.0, max_half=512)
 
 
 def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512):
@@ -286,6 +301,25 @@ def _convolve_same_length(signal, kernel):
     m = full.shape[0]
     start = jnp.maximum((m - n) // 2, 0)
     return jax.lax.dynamic_slice(full, (start,), (n,))
+
+
+def _convolve_velocity_space(lnwave, signal, sigma_ln, radius_mult=5.0, max_half=512):
+    """Convolve a spectrum with a Gaussian of fixed width in log-wavelength.
+
+    The input grid may be linear, logarithmic, or otherwise monotonic. The
+    convolution is performed on an internal uniform log-wavelength grid and then
+    interpolated back to the requested grid.
+    """
+    lnwave = jnp.asarray(lnwave, dtype=jnp.float64)
+    signal = jnp.asarray(signal, dtype=jnp.float64)
+    n = lnwave.shape[0]
+    ln_uniform = jnp.linspace(lnwave[0], lnwave[-1], n)
+    dln = jnp.maximum((lnwave[-1] - lnwave[0]) / jnp.maximum(n - 1, 1), 1e-8)
+    sigma_pix = jnp.maximum(sigma_ln, 1e-8) / dln
+    kern = _gaussian_kernel1d(sigma_pix, radius_mult=radius_mult, max_half=max_half)
+    signal_uniform = jnp.interp(ln_uniform, lnwave, signal, left=0.0, right=0.0)
+    convolved_uniform = _convolve_same_length(signal_uniform, kern)
+    return jnp.interp(lnwave, ln_uniform, convolved_uniform, left=0.0, right=0.0)
 
 
 def _fe_template_component(wave, wave_template, flux_template, norm, fwhm_kms, shift_frac, base_fwhm_kms=900.0):
@@ -331,11 +365,8 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     bc = jnp.where(wave <= lam_be, bc, 0.0)
 
     lnwave = jnp.log(wave)
-    dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(balmer_vel / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kernel = _gaussian_kernel1d(sigma_pix)
-    bc_conv = _convolve_same_length(bc, kernel)
+    bc_conv = _convolve_velocity_space(lnwave, bc, sigma_ln)
     return bc_conv
 
 
@@ -593,6 +624,7 @@ def build_fsps_template_grid(
     dsps_ssp_fn: str = 'tempdata.h5',
     z_qso: float = 0.0,
     build_physical_host_basis: bool = True,
+    template_norms: Sequence[float] | None = None,
 ) -> FSPSTemplateGrid:
     """Build a host-galaxy SSP template matrix on the observed wavelength grid."""
     # Parameters kept for API compatibility.
@@ -610,20 +642,33 @@ def build_fsps_template_grid(
     wave_out = np.asarray(wave_out, dtype=float)
     age_grid_gyr = np.asarray(age_grid_gyr, dtype=float)
     logzsol_grid = np.asarray(logzsol_grid, dtype=float)
+    template_norms_arr = None if template_norms is None else np.asarray(template_norms, dtype=float)
+    expected_templates = int(age_grid_gyr.size * logzsol_grid.size)
+    if template_norms_arr is not None and template_norms_arr.size != expected_templates:
+        raise ValueError(
+            "template_norms must match the age x metallicity template grid: "
+            f"got {template_norms_arr.size}, expected {expected_templates}."
+        )
     target_lg_age = np.log10(np.clip(age_grid_gyr, 1e-5, None))
     target_lgmet = _map_logzsol_to_dsps_lgmet(logzsol_grid, ssp_lgmet)
 
     tmpl = []
     meta = []
+    itemp = 0
     for i_z, logz in enumerate(logzsol_grid):
         imet = int(np.argmin(np.abs(ssp_lgmet - target_lgmet[i_z])))
         for i_a, age in enumerate(age_grid_gyr):
             iage = int(np.argmin(np.abs(ssp_lg_age_gyr - target_lg_age[i_a])))
             spec_native = np.asarray(ssp_flux[imet, iage, :], dtype=float)
             spec_interp = np.interp(wave_out, ssp_wave, spec_native, left=0.0, right=0.0)
-            norm = np.nanmedian(np.abs(spec_interp))
-            if not np.isfinite(norm) or norm <= 0:
-                norm = 1.0
+            if template_norms_arr is None:
+                norm = np.nanmedian(np.abs(spec_interp))
+                if not np.isfinite(norm) or norm <= 0:
+                    norm = 1.0
+            else:
+                norm = float(template_norms_arr[itemp])
+                if not np.isfinite(norm) or norm <= 0:
+                    raise ValueError("template_norms entries must be finite and positive.")
             spec_interp = spec_interp / norm
             tmpl.append(spec_interp)
             meta.append({
@@ -633,6 +678,7 @@ def build_fsps_template_grid(
                 'dsps_lgmet': float(ssp_lgmet[imet]),
                 'dsps_lg_age_gyr': float(ssp_lg_age_gyr[iage]),
             })
+            itemp += 1
 
     templates = np.column_stack(tmpl)
     t_obs_gyr = _cosmic_age_gyr(z_qso)
@@ -673,6 +719,7 @@ def reconstruct_posterior_components(
     fe_op_wave: np.ndarray,
     fe_op_flux: np.ndarray,
     custom_components: Sequence[CustomComponentSpec] | None = None,
+    template_norms: Sequence[float] | None = None,
     n_draws: int | None = None,
     return_components: bool = True,
     decompose_host: bool = True,
@@ -688,6 +735,7 @@ def reconstruct_posterior_components(
             age_grid_gyr=age_grid_gyr,
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
+            template_norms=template_norms,
         )
         templates = np.asarray(fsps_grid.templates, dtype=float)
     else:
@@ -734,99 +782,166 @@ def reconstruct_posterior_components(
     balmer_tau = np.asarray(samples.get('Balmer_Tau', np.full(n_total, 0.5)), dtype=float)[sl]
     balmer_vel = np.asarray(samples.get('Balmer_vel', np.full(n_total, 3000.0)), dtype=float)[sl]
 
-    component_draws = {
-        'host': np.zeros((n_use, wave_out.size), dtype=float),
-        'PL': np.zeros((n_use, wave_out.size), dtype=float),
-        'Fe_uv': np.zeros((n_use, wave_out.size), dtype=float),
-        'Fe_op': np.zeros((n_use, wave_out.size), dtype=float),
-        'Balmer_cont': np.zeros((n_use, wave_out.size), dtype=float),
-        'continuum': np.zeros((n_use, wave_out.size), dtype=float),
-    }
-    for comp in custom_components:
-        component_draws[comp.output_name] = np.zeros((n_use, wave_out.size), dtype=float)
+    if prior_config.get("PL_pivot", None) is None and np.any(np.asarray(pl_norm, dtype=float) != 0.0):
+        raise ValueError(
+            "Posterior reconstruction with power-law samples requires "
+            "prior_config['PL_pivot'] from the fitted wavelength grid."
+        )
     pl_pivot = float(np.asarray(_resolve_pl_pivot(wave_out, prior_config), dtype=float))
-    reddening_ebv = np.asarray(samples.get('reddening_ebv', np.zeros(n_total)), dtype=float)[sl]
+    reddening_a2500 = np.asarray(samples.get('reddening_a2500', np.zeros(n_total)), dtype=float)[sl]
     reddening_uv_ref = float(prior_config.get('reddening_uv_ref', 2500.0))
     reddening_alpha = float(prior_config.get('reddening_alpha', 1.2))
+    if fit_poly and fit_poly_order > 0:
+        poly_coeffs = np.column_stack([
+            np.asarray(samples.get(f'poly_c{k}', np.zeros(n_total)), dtype=float)[sl]
+            for k in range(1, fit_poly_order + 1)
+        ])
+    else:
+        poly_coeffs = np.zeros((n_use, 0), dtype=float)
 
-    for i in range(n_use):
-        host_intrinsic = templates @ fsps_weights[i]
-        host_model = np.asarray(
-            _shift_and_broaden_single_spectrum_lnlam(lnwave, host_intrinsic, gal_v[i], gal_sigma[i]),
-            dtype=float,
+    wave_j = jnp.asarray(wave_out, dtype=jnp.float64)
+    lnwave_j = jnp.asarray(lnwave, dtype=jnp.float64)
+    templates_j = jnp.asarray(templates, dtype=jnp.float64)
+    fsps_weights_j = jnp.asarray(fsps_weights, dtype=jnp.float64)
+    poly_coeffs_j = jnp.asarray(poly_coeffs, dtype=jnp.float64)
+    poly_powers_j = None
+    if fit_poly and fit_poly_order > 0:
+        w0 = float(np.asarray(_resolve_poly_pivot(wave_out, prior_config, require_configured=True), dtype=float))
+        x = (wave_out - w0) / max(w0, 1.0)
+        poly_powers_j = jnp.asarray(
+            np.vstack([x ** k for k in range(1, fit_poly_order + 1)]),
+            dtype=jnp.float64,
         )
 
-        pl_model = np.asarray(
-            _powerlaw_jax(
-                wave_out,
-                pl_norm=pl_norm[i],
-                pl_slope=pl_slope[i],
-                pivot=pl_pivot,
-            ),
-            dtype=float,
+    def _one_builtin_components(
+        weights_i,
+        pl_norm_i,
+        pl_slope_i,
+        gal_v_i,
+        gal_sigma_i,
+        fe_uv_norm_i,
+        fe_op_norm_i,
+        fe_uv_fwhm_i,
+        fe_op_fwhm_i,
+        fe_uv_shift_i,
+        fe_op_shift_i,
+        balmer_norm_i,
+        balmer_tau_i,
+        balmer_vel_i,
+        reddening_a2500_i,
+        poly_coeffs_i,
+    ):
+        host_intrinsic = templates_j @ weights_i
+        host_model = _shift_and_broaden_single_spectrum_lnlam(lnwave_j, host_intrinsic, gal_v_i, gal_sigma_i)
+
+        pl_model = _powerlaw_jax(
+            wave_j,
+            pl_norm=pl_norm_i,
+            pl_slope=pl_slope_i,
+            pivot=pl_pivot,
         )
+        reddening_atten = jnp.ones_like(wave_j)
         if fit_reddening:
-            pl_model = pl_model * np.asarray(
-                _smc_like_reddening_jax(
-                    wave_out,
-                    reddening_ebv[i],
-                    uv_ref=reddening_uv_ref,
-                    alpha=reddening_alpha,
-                ),
-                dtype=float,
+            reddening_atten = _smc_like_reddening_jax(
+                wave_j,
+                reddening_a2500_i,
+                uv_ref=reddening_uv_ref,
+                alpha=reddening_alpha,
             )
-        fe_uv_model = np.asarray(
-            _fe_template_component(wave_out, fe_uv_wave, fe_uv_flux, fe_uv_norm[i], fe_uv_fwhm[i], fe_uv_shift[i]),
-            dtype=float,
+            pl_model = pl_model * reddening_atten
+        fe_uv_model = _fe_template_component(
+            wave_j,
+            jnp.asarray(fe_uv_wave, dtype=jnp.float64),
+            jnp.asarray(fe_uv_flux, dtype=jnp.float64),
+            fe_uv_norm_i,
+            fe_uv_fwhm_i,
+            fe_uv_shift_i,
         )
-        fe_op_model = np.asarray(
-            _fe_template_component(wave_out, fe_op_wave, fe_op_flux, fe_op_norm[i], fe_op_fwhm[i], fe_op_shift[i]),
-            dtype=float,
+        fe_op_model = _fe_template_component(
+            wave_j,
+            jnp.asarray(fe_op_wave, dtype=jnp.float64),
+            jnp.asarray(fe_op_flux, dtype=jnp.float64),
+            fe_op_norm_i,
+            fe_op_fwhm_i,
+            fe_op_shift_i,
         )
-        bc_model = np.asarray(
-            _balmer_continuum_jax(wave_out, balmer_norm[i], 15000.0, balmer_tau[i], balmer_vel[i]),
-            dtype=float,
-        )
-        custom_total = np.zeros_like(wave_out)
-        for comp in custom_components:
-            def _sample_value(samples_dict, key, default=0.0):
-                val = float(np.asarray(samples_dict.get(key, np.full(n_total, default)), dtype=float)[sl][i])
-                return val
+        bc_model = _balmer_continuum_jax(wave_j, balmer_norm_i, 15000.0, balmer_tau_i, balmer_vel_i)
+        if fit_reddening:
+            fe_uv_model = fe_uv_model * reddening_atten
+            fe_op_model = fe_op_model * reddening_atten
+            bc_model = bc_model * reddening_atten
 
-            custom_model = np.asarray(
-                _evaluate_custom_component_jax(wave_out, samples, comp, _sample_value),
-                dtype=float,
-            )
-            component_draws[comp.output_name][i] = custom_model
-            custom_total = custom_total + custom_model
-
-        poly_model = np.ones_like(wave_out)
+        poly_model = jnp.ones_like(wave_j)
         if fit_poly:
-            w0 = 0.5 * (wave_out[0] + wave_out[-1])
-            x = (wave_out - w0) / max(w0, 1.0)
-            poly_base = np.ones_like(wave_out)
-            for k in range(1, fit_poly_order + 1):
-                key = f'poly_c{k}'
-                if key in samples:
-                    poly_base = poly_base + float(np.asarray(samples[key], dtype=float)[sl][i]) * (x ** k)
-            poly_model = np.clip(poly_base, 0.2, 5.0)
+            poly_base = jnp.ones_like(wave_j)
+            if fit_poly_order > 0:
+                poly_base = poly_base + jnp.sum(poly_coeffs_i[:, None] * poly_powers_j, axis=0)
+            poly_model = jnp.clip(poly_base, 0.2, 5.0)
 
         host_model = host_model * poly_model
         pl_model = pl_model * poly_model
         fe_uv_model = fe_uv_model * poly_model
         fe_op_model = fe_op_model * poly_model
         bc_model = bc_model * poly_model
-        custom_total = custom_total * poly_model
-        for comp in custom_components:
-            component_draws[comp.output_name][i] = component_draws[comp.output_name][i] * poly_model
-        continuum_model = pl_model + fe_uv_model + fe_op_model + bc_model + custom_total + host_model
+        continuum_model = pl_model + fe_uv_model + fe_op_model + bc_model + host_model
+        return host_model, pl_model, fe_uv_model, fe_op_model, bc_model, continuum_model, poly_model, reddening_atten
 
-        component_draws['host'][i] = host_model
-        component_draws['PL'][i] = pl_model
-        component_draws['Fe_uv'][i] = fe_uv_model
-        component_draws['Fe_op'][i] = fe_op_model
-        component_draws['Balmer_cont'][i] = bc_model
-        component_draws['continuum'][i] = continuum_model
+    (
+        host_draws,
+        pl_draws,
+        fe_uv_draws,
+        fe_op_draws,
+        bc_draws,
+        continuum_draws,
+        poly_draws,
+        reddening_atten_draws,
+    ) = jax.vmap(_one_builtin_components)(
+        fsps_weights_j,
+        jnp.asarray(pl_norm, dtype=jnp.float64),
+        jnp.asarray(pl_slope, dtype=jnp.float64),
+        jnp.asarray(gal_v, dtype=jnp.float64),
+        jnp.asarray(gal_sigma, dtype=jnp.float64),
+        jnp.asarray(fe_uv_norm, dtype=jnp.float64),
+        jnp.asarray(fe_op_norm, dtype=jnp.float64),
+        jnp.asarray(fe_uv_fwhm, dtype=jnp.float64),
+        jnp.asarray(fe_op_fwhm, dtype=jnp.float64),
+        jnp.asarray(fe_uv_shift, dtype=jnp.float64),
+        jnp.asarray(fe_op_shift, dtype=jnp.float64),
+        jnp.asarray(balmer_norm, dtype=jnp.float64),
+        jnp.asarray(balmer_tau, dtype=jnp.float64),
+        jnp.asarray(balmer_vel, dtype=jnp.float64),
+        jnp.asarray(reddening_a2500, dtype=jnp.float64),
+        poly_coeffs_j,
+    )
+
+    component_draws = {
+        'host': np.asarray(host_draws, dtype=float),
+        'PL': np.asarray(pl_draws, dtype=float),
+        'Fe_uv': np.asarray(fe_uv_draws, dtype=float),
+        'Fe_op': np.asarray(fe_op_draws, dtype=float),
+        'Balmer_cont': np.asarray(bc_draws, dtype=float),
+        'continuum': np.asarray(continuum_draws, dtype=float),
+    }
+    poly_draws_np = np.asarray(poly_draws, dtype=float)
+    reddening_atten_draws_np = np.asarray(reddening_atten_draws, dtype=float)
+    custom_total_draws = np.zeros((n_use, wave_out.size), dtype=float)
+    for comp in custom_components:
+        comp_draws = np.zeros((n_use, wave_out.size), dtype=float)
+        for i in range(n_use):
+            def _sample_value(samples_dict, key, default=0.0):
+                val = float(np.asarray(samples_dict.get(key, np.full(n_total, default)), dtype=float)[sl][i])
+                return val
+
+            comp_draw = np.asarray(
+                _evaluate_custom_component_jax(wave_out, samples, comp, _sample_value),
+                dtype=float,
+            ) * reddening_atten_draws_np[i] * poly_draws_np[i]
+            comp_draws[i] = comp_draw
+            custom_total_draws[i] = custom_total_draws[i] + comp_draw
+        component_draws[comp.output_name] = comp_draws
+
+    if custom_components:
+        component_draws['continuum'] = component_draws['continuum'] + custom_total_draws
 
     output_draws = component_draws if return_components else {'continuum': component_draws['continuum']}
     return {
@@ -1133,11 +1248,14 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         pl_norm = numpyro.sample('PL_norm', dist.HalfNormal(_cfg_halfnorm('PL_norm')))
         pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
         pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
-        reddening_ebv = numpyro.sample('reddening_ebv', dist.HalfNormal(_cfg_halfnorm('reddening_ebv'))) if fit_reddening else jnp.asarray(0.0)
+        reddening_a2500 = (
+            numpyro.sample('reddening_a2500', dist.HalfNormal(_cfg_halfnorm('reddening_a2500')))
+            if fit_reddening else jnp.asarray(0.0)
+        )
     else:
         pl_norm = jnp.asarray(0.0)
         pl_slope = jnp.asarray(0.0)
-        reddening_ebv = jnp.asarray(0.0)
+        reddening_a2500 = jnp.asarray(0.0)
         if decompose_host:
             frac_host = jnp.asarray(1.0)
 
@@ -1180,7 +1298,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     reddening_atten = (
         _smc_like_reddening_jax(
             wave,
-            reddening_ebv,
+            reddening_a2500,
             uv_ref=float(prior_config.get('reddening_uv_ref', 2500.0)),
             alpha=float(prior_config.get('reddening_alpha', 1.2)),
         )
@@ -1197,9 +1315,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     else:
         bc_model_intrinsic = jnp.zeros_like(wave)
     pl_model = pl_model_intrinsic * reddening_atten
-    fe_uv_model = fe_uv_model_intrinsic
-    fe_op_model = fe_op_model_intrinsic
-    bc_model = bc_model_intrinsic
+    fe_uv_model = fe_uv_model_intrinsic * reddening_atten
+    fe_op_model = fe_op_model_intrinsic * reddening_atten
+    bc_model = bc_model_intrinsic * reddening_atten
     custom_models = {}
     custom_total_model = jnp.zeros_like(wave)
     for comp in custom_components:
@@ -1210,12 +1328,13 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             return _sample_from_prior_config(key, cfg)
 
         custom_model_intrinsic = _evaluate_custom_component_jax(wave, prior_config, comp, _sample_value)
-        custom_models[comp.output_name] = custom_model_intrinsic
-        custom_total_model = custom_total_model + custom_model_intrinsic
+        custom_model = custom_model_intrinsic * reddening_atten
+        custom_models[comp.output_name] = custom_model
+        custom_total_model = custom_total_model + custom_model
     poly_model = jnp.ones_like(wave)
     if fit_poly:
         poly_order = int(max(fit_poly_order, 0))
-        w0 = 0.5 * (wave[0] + wave[-1])
+        w0 = _resolve_poly_pivot(wave, prior_config)
         x = (wave - w0) / jnp.maximum(w0, 1.0)
         # Global low-order tilt
         poly_base = jnp.ones_like(wave)
@@ -1244,7 +1363,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             if fit_reddening:
                 pl_flux_lum = pl_flux_lum * _smc_like_reddening_jax(
                     jnp.asarray(wave_lum),
-                    reddening_ebv,
+                    reddening_a2500,
                     uv_ref=float(prior_config.get('reddening_uv_ref', 2500.0)),
                     alpha=float(prior_config.get('reddening_alpha', 1.2)),
                 )
@@ -1300,7 +1419,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         else:
             custom_line_narrow_intrinsic = custom_line_narrow_intrinsic + custom_line_model
 
-    line_components_are_split = return_line_components or use_psf_phot
+    line_components_are_split = return_line_components or use_psf_phot or fit_reddening
     if use_lines and tied_line_meta['n_lines'] > 0:
         n_v = tied_line_meta['n_vgroups']
         n_w = tied_line_meta['n_wgroups']
@@ -1395,9 +1514,14 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         line_model_intrinsic = custom_line_broad_intrinsic + custom_line_narrow_intrinsic
 
     gal_model = gal_model_intrinsic
-    line_model_broad = line_model_broad_intrinsic
+    line_model_broad = line_model_broad_intrinsic * reddening_atten
     line_model_narrow = line_model_narrow_intrinsic
-    line_model = line_model_intrinsic
+    line_model = line_model_broad + line_model_narrow if line_components_are_split else line_model_intrinsic
+    custom_line_models = {
+        comp.output_name: custom_line_models[comp.output_name]
+        * (reddening_atten if comp.line_kind == 'broad' else 1.0)
+        for comp in custom_line_components
+    }
     if fit_poly:
         gal_model = gal_model * poly_model
         if line_components_are_split:
@@ -1448,6 +1572,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             sig = jnp.sqrt(psf_mag_errs[i] ** 2 + sigma_phot_extra ** 2)
             numpyro.sample(f'psf_mag_obs_{i}', dist.Normal(m_syn, sig), obs=psf_mags[i])
 
+    if emit_deterministics and not (fit_pl and fit_reddening):
+        numpyro.deterministic('reddening_a2500', reddening_a2500)
     if emit_deterministics:
         numpyro.deterministic('f_pl_model', pl_model)
         numpyro.deterministic('f_fe_mgii_model', fe_uv_model)

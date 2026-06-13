@@ -1,6 +1,6 @@
 import numpy as np
 import jax
-from numpyro.handlers import seed, trace
+from numpyro.handlers import seed, substitute, trace
 
 from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
 
@@ -98,3 +98,36 @@ def test_evaluate_joint_spectral_components_reports_fixed_narrow_line_controls()
     assert tr["jqf_line_narrow_fwhm_kms"]["value"] == 321.0
     assert tr["jqf_line_narrow_amp_scale"]["value"] == 2.5
     assert np.nanmax(np.asarray(tr["jqf_line_model_narrow"]["value"])) > 0.0
+
+
+def test_evaluate_joint_spectral_components_converts_feii_template_to_fnu_shape():
+    wave_obs = np.array([2000.0, 3000.0, 4000.0])
+    continuum = np.zeros_like(wave_obs)
+    template_wave = np.array([1000.0, 5000.0])
+    template_flux = np.ones_like(template_wave)
+    fn = substitute(
+        seed(evaluate_joint_spectral_components, jax.random.PRNGKey(7)),
+        data={
+            "jqf_feii_norm": 1.0,
+            "jqf_feii_fwhm": 1.0,
+            "jqf_feii_shift": 0.0,
+        },
+    )
+
+    tr = trace(fn).get_trace(
+        wave_obs=wave_obs,
+        redshift=0.0,
+        continuum_mjy=continuum,
+        config=SpectralComponentConfig(
+            use_lines=False,
+            use_feii=True,
+            use_balmer_continuum=False,
+            feii_fnu_pivot_rest=3000.0,
+        ),
+        feii_template_wave_rest=template_wave,
+        feii_template_flux=template_flux,
+    )
+    feii = np.asarray(tr["jqf_feii_model"]["value"])
+
+    assert feii[2] / feii[0] > 3.9
+    assert np.isclose(feii[1] / feii[0], (3000.0 / 2000.0) ** 2, rtol=0.05)

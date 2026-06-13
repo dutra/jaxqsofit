@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
+from types import SimpleNamespace
 from jaxsedfit.host import HostBasisJax
 
 import jaxqsofit.model as model_mod
@@ -12,11 +13,14 @@ from jaxqsofit.model import (
     _delayed_sfh_host_spectrum,
     _fe_template_component,
     _host_redshift_prior_params,
+    _smc_like_reddening_jax,
     _extract_line_table_from_prior_config,
     _luminosity_distance_cm_jax,
     _shift_and_broaden_single_spectrum_lnlam,
+    build_fsps_template_grid,
     build_tied_line_meta_from_linelist,
     qso_fsps_joint_model,
+    reconstruct_posterior_components,
 )
 
 
@@ -32,6 +36,44 @@ def test_extract_line_table_from_prior_config_layouts():
     assert _extract_line_table_from_prior_config(cfg2) is table
     assert _extract_line_table_from_prior_config(cfg3) is table
     assert _extract_line_table_from_prior_config(cfg4) is table
+
+
+def test_package_enables_jax_x64_explicitly():
+    assert jax.config.jax_enable_x64 is True
+
+
+def test_reddening_a2500_site_is_unique_when_sampled():
+    wave = np.linspace(2000.0, 3000.0, 8)
+    flux = np.ones_like(wave)
+    err = np.full_like(wave, 0.1)
+    prior_config = build_default_prior_config(flux)
+    prior_config["PL_pivot"] = 2500.0
+    prior_config["poly_pivot"] = 2500.0
+    fsps_grid = SimpleNamespace(templates=np.zeros((wave.size, 1)))
+    tied_line_meta = build_tied_line_meta_from_linelist([], wave)
+
+    model_trace = trace(seed(qso_fsps_joint_model, 0)).get_trace(
+        wave,
+        flux,
+        err,
+        None,
+        tied_line_meta,
+        fsps_grid,
+        np.array([2000.0, 3000.0]),
+        np.zeros(2),
+        np.array([2000.0, 3000.0]),
+        np.zeros(2),
+        use_lines=False,
+        prior_config=prior_config,
+        decompose_host=False,
+        fit_pl=True,
+        fit_fe=False,
+        fit_bc=False,
+        fit_poly=False,
+        fit_reddening=True,
+    )
+
+    assert model_trace["reddening_a2500"]["type"] == "sample"
 
 
 def test_fe_template_component_smoothly_bounds_fwhm_below_template_base():
@@ -85,6 +127,171 @@ def test_shift_and_broaden_uses_wide_kernel_for_broad_components():
     assert bool(jnp.all(jnp.isfinite(broadened)))
     assert float(jnp.sum(broadened)) > 0.99
     assert float(jnp.max(broadened)) < 0.003
+
+
+def test_smc_like_reddening_parameter_is_a2500_magnitude():
+    atten = _smc_like_reddening_jax(jnp.asarray([2500.0]), a_uv=1.0)
+
+    assert np.isclose(float(atten[0]), 10.0 ** -0.4)
+
+
+def test_build_fsps_template_grid_can_reuse_fit_template_norms(monkeypatch):
+    ssp_wave = np.linspace(1000.0, 5000.0, 10)
+
+    class _SSPData:
+        pass
+
+    _SSPData.ssp_lgmet = np.array([0.0])
+    _SSPData.ssp_lg_age_gyr = np.array([0.0])
+    _SSPData.ssp_wave = ssp_wave
+    _SSPData.ssp_flux = (1.0 + 0.001 * (ssp_wave - 1000.0))[None, None, :]
+
+    monkeypatch.setattr(model_mod, "load_ssp_templates", lambda fn: _SSPData())
+
+    fit_grid = build_fsps_template_grid(
+        wave_out=np.linspace(3000.0, 5000.0, 20),
+        age_grid_gyr=[1.0],
+        logzsol_grid=[0.0],
+        dsps_ssp_fn="unused.h5",
+        build_physical_host_basis=False,
+    )
+    fit_norms = [meta["norm"] for meta in fit_grid.template_meta]
+    recon_grid = build_fsps_template_grid(
+        wave_out=np.linspace(2000.0, 5000.0, 20),
+        age_grid_gyr=[1.0],
+        logzsol_grid=[0.0],
+        dsps_ssp_fn="unused.h5",
+        build_physical_host_basis=False,
+        template_norms=fit_norms,
+    )
+
+    assert recon_grid.template_meta[0]["norm"] == fit_norms[0]
+    assert not np.isclose(np.nanmedian(np.abs(recon_grid.templates[:, 0])), 1.0)
+
+
+def test_reconstruct_requires_fit_grid_pivots_for_grid_dependent_terms():
+    wave = np.linspace(2000.0, 3600.0, 8)
+    samples = {
+        "PL_norm": np.array([1.0]),
+        "PL_slope": np.array([0.0]),
+        "fsps_weights": np.zeros((1, 1)),
+    }
+
+    try:
+        reconstruct_posterior_components(
+            wave,
+            samples,
+            pred_out=None,
+            age_grid_gyr=[1.0],
+            logzsol_grid=[0.0],
+            dsps_ssp_fn="unused.h5",
+            prior_config={},
+            fit_poly=False,
+            fit_poly_order=0,
+            fit_reddening=False,
+            fe_uv_wave=np.array([2000.0, 3600.0]),
+            fe_uv_flux=np.zeros(2),
+            fe_op_wave=np.array([2000.0, 3600.0]),
+            fe_op_flux=np.zeros(2),
+            decompose_host=False,
+        )
+    except ValueError as exc:
+        assert "PL_pivot" in str(exc)
+    else:
+        raise AssertionError("missing PL_pivot should fail reconstruction with PL samples")
+
+    samples = {
+        "PL_norm": np.array([0.0]),
+        "poly_c1": np.array([0.1]),
+        "fsps_weights": np.zeros((1, 1)),
+    }
+    try:
+        reconstruct_posterior_components(
+            wave,
+            samples,
+            pred_out=None,
+            age_grid_gyr=[1.0],
+            logzsol_grid=[0.0],
+            dsps_ssp_fn="unused.h5",
+            prior_config={"PL_pivot": 2500.0},
+            fit_poly=True,
+            fit_poly_order=1,
+            fit_reddening=False,
+            fe_uv_wave=np.array([2000.0, 3600.0]),
+            fe_uv_flux=np.zeros(2),
+            fe_op_wave=np.array([2000.0, 3600.0]),
+            fe_op_flux=np.zeros(2),
+            decompose_host=False,
+        )
+    except ValueError as exc:
+        assert "poly_pivot" in str(exc)
+    else:
+        raise AssertionError("missing poly_pivot should fail reconstruction with polynomial samples")
+
+
+def test_reconstruct_reddening_applies_to_nuclear_continuum_components():
+    wave = np.linspace(2000.0, 3600.0, 80)
+    samples = {
+        "PL_norm": np.array([10.0]),
+        "PL_slope": np.array([0.0]),
+        "Fe_uv_norm": np.array([5.0]),
+        "log_Fe_op_over_uv": np.array([0.0]),
+        "Fe_uv_FWHM": np.array([3000.0]),
+        "Fe_op_FWHM": np.array([3000.0]),
+        "Fe_uv_shift": np.array([0.0]),
+        "Fe_op_shift": np.array([0.0]),
+        "Balmer_norm": np.array([3.0]),
+        "Balmer_Tau": np.array([0.5]),
+        "Balmer_vel": np.array([3000.0]),
+        "reddening_a2500": np.array([1.0]),
+        "fsps_weights": np.zeros((1, 1)),
+        "gal_v_kms": np.array([0.0]),
+        "gal_sigma_kms": np.array([100.0]),
+    }
+    prior_config = {"PL_pivot": 2500.0, "reddening_uv_ref": 2500.0, "reddening_alpha": 1.2}
+    fe_wave = np.linspace(1900.0, 3700.0, 80)
+    fe_flux = np.ones_like(fe_wave)
+
+    plain = reconstruct_posterior_components(
+        wave,
+        samples,
+        pred_out=None,
+        age_grid_gyr=[1.0],
+        logzsol_grid=[0.0],
+        dsps_ssp_fn="unused.h5",
+        prior_config=prior_config,
+        fit_poly=False,
+        fit_poly_order=0,
+        fit_reddening=False,
+        fe_uv_wave=fe_wave,
+        fe_uv_flux=fe_flux,
+        fe_op_wave=fe_wave,
+        fe_op_flux=fe_flux,
+        decompose_host=False,
+    )
+    reddened = reconstruct_posterior_components(
+        wave,
+        samples,
+        pred_out=None,
+        age_grid_gyr=[1.0],
+        logzsol_grid=[0.0],
+        dsps_ssp_fn="unused.h5",
+        prior_config=prior_config,
+        fit_poly=False,
+        fit_poly_order=0,
+        fit_reddening=True,
+        fe_uv_wave=fe_wave,
+        fe_uv_flux=fe_flux,
+        fe_op_wave=fe_wave,
+        fe_op_flux=fe_flux,
+        decompose_host=False,
+    )
+    idx = int(np.argmin(np.abs(wave - 2500.0)))
+    expected = float(_smc_like_reddening_jax(jnp.asarray([wave[idx]]), a_uv=1.0)[0])
+
+    for key in ("PL", "Fe_uv", "Fe_op", "Balmer_cont"):
+        ratio = reddened["draws"][key][0, idx] / plain["draws"][key][0, idx]
+        assert np.isclose(ratio, expected, rtol=1e-4)
 
 
 def test_build_tied_line_meta_from_linelist_minimal():
