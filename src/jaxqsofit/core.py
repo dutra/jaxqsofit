@@ -36,6 +36,7 @@ from .model import (
     C_KMS,
     _continuum_output_waves_from_prior_config,
     _extract_line_table_from_prior_config,
+    _format_wave_label,
     _get_sfd_query,
     _normalize_template_flux,
     _np_to_jnp,
@@ -198,6 +199,7 @@ class QSOFit:
             'f_fe_balmer_model',
             'f_bc_model',
             'f_poly_model',
+            'reddening_a2500',
             'agn_model',
             'gal_model',
             'line_model_broad',
@@ -222,7 +224,7 @@ class QSOFit:
         for wave_lum in _continuum_output_waves_from_prior_config(
             getattr(self, "_fit_prior_config", None)
         ):
-            wave_label = self._format_wave_label(wave_lum)
+            wave_label = _format_wave_label(wave_lum)
             return_sites.append(f"log_lambda_Llambda_{wave_label}_agn")
         return_sites += custom_component_site_names(custom_components)
         return_sites += custom_line_component_site_names(custom_line_components)
@@ -625,6 +627,7 @@ class QSOFit:
             "_fit_method",
             "_fit_fsps_age_grid",
             "_fit_fsps_logzsol_grid",
+            "_fit_fsps_template_norms",
             "_fit_prior_config",
             "_fit_dsps_ssp_fn",
             "_fit_use_psf_phot",
@@ -1057,7 +1060,9 @@ class QSOFit:
             coefficients ``poly_c1`` through ``poly_cN``.
         fit_reddening : bool, optional
             If True, apply a built-in smooth SMC-like reddening curve to the
-            AGN power-law continuum.
+            nuclear continuum components and broad-line emission. The fitted
+            ``reddening_a2500`` parameter is ``A(2500 Angstrom)`` in magnitudes
+            for the default curve, not literal ``E(B-V)``.
         mask_lya_forest : bool, optional
             If True, mask pixels with rest-frame wavelength below Ly-alpha
             (1215.67 Angstrom) before fitting.
@@ -1221,6 +1226,10 @@ class QSOFit:
         if pl_pivot is None:
             pl_pivot = _spectrum_center_pivot(self.wave)
         prior_config["PL_pivot"] = float(np.asarray(pl_pivot, dtype=float))
+        poly_pivot = prior_config.get("poly_pivot", None)
+        if poly_pivot is None:
+            poly_pivot = _spectrum_center_pivot(self.wave)
+        prior_config["poly_pivot"] = float(np.asarray(poly_pivot, dtype=float))
         self._fit_prior_config = prior_config
         psf_mags_use, psf_mag_errs_use, _psf_bands_use, psf_filter_curves_use, use_psf_phot_use = self._prepare_psf_photometry(
             wave_obs=self.lam,
@@ -2074,6 +2083,9 @@ class QSOFit:
         flux = np.asarray(self.flux, dtype=float)
         self.numpyro_samples = samples
         self.fsps_grid = fsps_grid
+        self._fit_fsps_template_norms = tuple(
+            float(meta.get("norm", 1.0)) for meta in getattr(fsps_grid, "template_meta", [])
+        )
         self.pred_out = pred_out
         self._pred_host_draws = np.asarray(pred_out['gal_model'])
         self._pred_bc_draws = np.asarray(pred_out['f_bc_model'])
@@ -2241,7 +2253,7 @@ class QSOFit:
         log_lambda_llambda_names = []
         log_lambda_llambda_err_names = []
         for w0 in cont_waves:
-            wave_label = self._format_wave_label(w0)
+            wave_label = _format_wave_label(w0)
             frac_host = self._host_fraction_at_wave(w0)
             frac_host_psf = self._host_fraction_psf_at_wave(w0)
             frac_bc = self._bc_fraction_at_wave(w0)
@@ -2293,12 +2305,12 @@ class QSOFit:
         else:
             pl_slope_med = np.nan
             pl_slope_err = np.nan
-        if 'reddening_ebv' in samples:
-            reddening_ebv_med = float(np.nanmedian(np.asarray(samples['reddening_ebv'])))
-            reddening_ebv_err = float(np.nanstd(np.asarray(samples['reddening_ebv'])))
+        if 'reddening_a2500' in samples:
+            reddening_a2500_med = float(np.nanmedian(np.asarray(samples['reddening_a2500'])))
+            reddening_a2500_err = float(np.nanstd(np.asarray(samples['reddening_a2500'])))
         else:
-            reddening_ebv_med = np.nan
-            reddening_ebv_err = np.nan
+            reddening_a2500_med = np.nan
+            reddening_a2500_err = np.nan
         conti_entries = [
             ('ra', self.ra, 'float'),
             ('dec', self.dec, 'float'),
@@ -2309,8 +2321,8 @@ class QSOFit:
             ('PL_norm_err', float(np.nanstd(pl_norm_samp)), 'float'),
             ('PL_slope', pl_slope_med, 'float'),
             ('PL_slope_err', pl_slope_err, 'float'),
-            ('reddening_ebv', reddening_ebv_med, 'float'),
-            ('reddening_ebv_err', reddening_ebv_err, 'float'),
+            ('reddening_a2500', reddening_a2500_med, 'float'),
+            ('reddening_a2500_err', reddening_a2500_err, 'float'),
             ('pivot_wave', self.pivot_wave, 'float'),
             ('frac_host_pivot', self.frac_host_pivot, 'float'),
             ('frac_host_psf_pivot', self.frac_host_psf_pivot, 'float'),
@@ -2630,7 +2642,12 @@ class QSOFit:
             wmax = float(np.nanmax(wave_native) if wave_max is None else wave_max)
             if wmin >= wmax:
                 raise ValueError("Requested reconstruction grid has non-positive span.")
-            wave_out = np.arange(wmin, wmax + 0.5 * dw, dw, dtype=float)
+            dln = float(np.nanmedian(np.diff(np.log(np.asarray(wave_native, dtype=float)))))
+            if not np.isfinite(dln) or dln <= 0:
+                raise RuntimeError("Unable to infer logarithmic wavelength spacing for reconstruction.")
+            ln_grid = np.arange(np.log(wmin), np.log(wmax) + 0.5 * dln, dln, dtype=float)
+            wave_out = np.exp(ln_grid)
+            wave_out[0] = wmin
         else:
             wave_out = np.asarray(wave_out, dtype=float)
 
@@ -2640,6 +2657,12 @@ class QSOFit:
         prior_config = getattr(self, '_fit_prior_config', None)
         if prior_config is None:
             prior_config = build_default_prior_config(np.asarray(self.flux, dtype=float))
+        else:
+            prior_config = dict(prior_config)
+        if prior_config.get("PL_pivot", None) is None:
+            prior_config["PL_pivot"] = float(np.asarray(_spectrum_center_pivot(wave_native), dtype=float))
+        if prior_config.get("poly_pivot", None) is None:
+            prior_config["poly_pivot"] = float(np.asarray(_spectrum_center_pivot(wave_native), dtype=float))
         age_grid_gyr, logzsol_grid, dsps_ssp_fn = self._require_posterior_bundle_fsps_metadata(self.__dict__)
         expected_templates = int(len(age_grid_gyr) * len(logzsol_grid))
         self._validate_fsps_weights_shape(
@@ -2663,6 +2686,7 @@ class QSOFit:
             fe_op_wave=self.fe_op_wave,
             fe_op_flux=self.fe_op_flux,
             custom_components=getattr(self, '_fit_custom_components', ()),
+            template_norms=getattr(self, '_fit_fsps_template_norms', None),
             n_draws=n_draws,
             return_components=return_components,
             decompose_host=bool(getattr(self, '_fit_decompose_host', True)),
@@ -3055,8 +3079,10 @@ class QSOFit:
             param_names = sorted(samples.keys())
         elif param_names is None:
             param_names = [
-                'cont_norm', 'log_frac_host', 'PL_slope', 'Fe_uv_norm', 'Fe_op_norm',
-                'Balmer_norm', 'Balmer_Te', 'Balmer_Tau',
+                'cont_norm', 'log_frac_host', 'PL_norm', 'PL_slope',
+                'Fe_uv_norm', 'log_Fe_op_over_uv',
+                'Fe_uv_FWHM', 'Fe_op_FWHM',
+                'Balmer_norm', 'Balmer_Tau', 'Balmer_vel',
                 'gal_v_kms', 'gal_sigma_kms',
                 'frac_jitter', 'add_jitter',
             ]
@@ -3078,17 +3104,6 @@ class QSOFit:
                 for i in range(ncomp):
                     out.append((f'{name}[{i}]', arr2[:, i]))
         return out
-
-    @staticmethod
-    def _format_wave_label(w0):
-        """Format a continuum wavelength for attribute/column naming."""
-        try:
-            w = float(w0)
-        except Exception:
-            return str(w0)
-        if np.isfinite(w) and abs(w - round(w)) < 1e-6:
-            return str(int(round(w)))
-        return str(w).replace('.', 'p')
 
     @staticmethod
     def _build_result_arrays(entries):

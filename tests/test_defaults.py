@@ -17,7 +17,8 @@ def test_build_default_prior_config_has_expected_keys():
         'PL_norm',
         'PL_slope',
         'PL_pivot',
-        'reddening_ebv',
+        'poly_pivot',
+        'reddening_a2500',
         'log_frac_host',
         'tau_host',
         'raw_w',
@@ -31,6 +32,7 @@ def test_build_default_prior_config_has_expected_keys():
     for k in required:
         assert k in cfg
     assert cfg["host_sfh_model"] == "delayed"
+    assert cfg["poly_pivot"] is None
     assert cfg["log_stellar_mass"] == {
         "dist": "TruncatedNormal",
         "loc": 9.0,

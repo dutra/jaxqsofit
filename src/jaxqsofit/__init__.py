@@ -1,3 +1,7 @@
+import numpyro
+
+numpyro.enable_x64()
+
 from .core import QSOFit
 from .custom_components import (
     CustomComponentSpec,

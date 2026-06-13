@@ -376,6 +376,13 @@ def build_default_prior_config(
         Optional manual override for the power-law continuum pivot wavelength in
         Angstrom. If ``None``, the model uses the midpoint of the fitted rest-frame
         wavelength coverage.
+
+    Notes
+    -----
+    ``reddening_a2500`` controls the amplitude of the built-in SMC-like
+    attenuation curve. Because the curve is normalized to unity at
+    ``reddening_uv_ref`` (2500 Angstrom by default), this parameter is
+    :math:`A(2500)` in magnitudes rather than literal ``E(B-V)``.
     """
     f = np.asarray(flux, dtype=float)
     finite = np.isfinite(f)
@@ -391,7 +398,8 @@ def build_default_prior_config(
         "PL_norm": {"dist": "HalfNormal", "scale": max(0.5 * fscale, AMPLITUDE_FLOOR)},
         "PL_slope": {"dist": "Normal", "loc": -1.5, "scale": 0.4},
         "PL_pivot": None if pl_pivot is None else float(pl_pivot),
-        "reddening_ebv": {"dist": "HalfNormal", "scale": 0.3},
+        "poly_pivot": None,
+        "reddening_a2500": {"dist": "HalfNormal", "scale": 0.3},
         "reddening_uv_ref": 2500.0,
         "reddening_alpha": 1.2,
         "log_frac_host": {"dist": "StudentT", "loc": 0.0, "scale": 2.0, "df": 3.0},

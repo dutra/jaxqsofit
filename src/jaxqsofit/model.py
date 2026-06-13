@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import extinction
+import numpyro
+
+numpyro.enable_x64()
 
 import jax
 import jax.numpy as jnp
-import numpyro
 import numpyro.distributions as dist
 
 from dsps import load_ssp_templates
@@ -26,8 +27,6 @@ from .custom_components import (
     normalize_custom_components,
     normalize_custom_line_components,
 )
-
-warnings.filterwarnings("ignore")
 
 C_KMS = 299792.458
 _SFD_QUERY_CACHE: Dict[str, Any] = {}
@@ -74,6 +73,20 @@ def _resolve_pl_pivot(wave, prior_config):
         pivot = prior_config.get("PL_pivot", None)
         if pivot is not None:
             return jnp.maximum(jnp.asarray(float(pivot)), 1e-8)
+    return _spectrum_center_pivot(wave)
+
+
+def _resolve_poly_pivot(wave, prior_config, *, require_configured=False):
+    """Return the polynomial pivot wavelength used by the fitted model."""
+    if prior_config is not None:
+        pivot = prior_config.get("poly_pivot", None)
+        if pivot is not None:
+            return jnp.maximum(jnp.asarray(float(pivot)), 1e-8)
+    if require_configured:
+        raise ValueError(
+            "Posterior reconstruction with fitted polynomial coefficients requires "
+            "prior_config['poly_pivot'] from the fitted wavelength grid."
+        )
     return _spectrum_center_pivot(wave)
 
 
@@ -210,13 +223,18 @@ def negative_gaussian_bal_component(wave, params, metadata):
     return -depth * jnp.exp(-0.5 * jnp.abs(x) ** shape_power)
 
 
-def _smc_like_reddening_jax(wave, ebv, uv_ref=2500.0, alpha=1.2):
-    """Return a smooth SMC-like attenuation curve."""
-    ebv = jnp.maximum(jnp.asarray(ebv), 0.0)
+def _smc_like_reddening_jax(wave, a_uv, uv_ref=2500.0, alpha=1.2):
+    """Return a smooth SMC-like attenuation curve.
+
+    The amplitude is normalized at ``uv_ref``: ``a_uv`` is
+    :math:`A(\\mathrm{uv\\_ref})` in magnitudes, not a literal
+    color excess.
+    """
+    a_uv = jnp.maximum(jnp.asarray(a_uv), 0.0)
     uv_ref = jnp.maximum(jnp.asarray(uv_ref), 1e-8)
     alpha = jnp.asarray(alpha)
     k_lambda = (jnp.clip(wave, 1e-8, None) / uv_ref) ** (-alpha)
-    return 10.0 ** (-0.4 * ebv * k_lambda)
+    return 10.0 ** (-0.4 * a_uv * k_lambda)
 
 
 def _many_gauss_lnlam(lnlam, amps, mus, sigs):
@@ -254,16 +272,13 @@ def _synth_ab_mag_from_grid(wave_obs, flam_obs, filt_trans):
 
 def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms):
     """Apply LOS velocity shift and Gaussian broadening to one spectrum."""
-    dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512)
 
     wave = jnp.exp(lnwave)
     shift_ln = v_kms / C_KMS
     shifted_wave = jnp.exp(lnwave - shift_ln)
     shifted = jnp.interp(shifted_wave, wave, spectrum, left=0.0, right=0.0)
-    return _convolve_same_length(shifted, kern)
+    return _convolve_velocity_space(lnwave, shifted, sigma_ln, radius_mult=5.0, max_half=512)
 
 
 def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=512):
@@ -286,6 +301,25 @@ def _convolve_same_length(signal, kernel):
     m = full.shape[0]
     start = jnp.maximum((m - n) // 2, 0)
     return jax.lax.dynamic_slice(full, (start,), (n,))
+
+
+def _convolve_velocity_space(lnwave, signal, sigma_ln, radius_mult=5.0, max_half=512):
+    """Convolve a spectrum with a Gaussian of fixed width in log-wavelength.
+
+    The input grid may be linear, logarithmic, or otherwise monotonic. The
+    convolution is performed on an internal uniform log-wavelength grid and then
+    interpolated back to the requested grid.
+    """
+    lnwave = jnp.asarray(lnwave, dtype=jnp.float64)
+    signal = jnp.asarray(signal, dtype=jnp.float64)
+    n = lnwave.shape[0]
+    ln_uniform = jnp.linspace(lnwave[0], lnwave[-1], n)
+    dln = jnp.maximum((lnwave[-1] - lnwave[0]) / jnp.maximum(n - 1, 1), 1e-8)
+    sigma_pix = jnp.maximum(sigma_ln, 1e-8) / dln
+    kern = _gaussian_kernel1d(sigma_pix, radius_mult=radius_mult, max_half=max_half)
+    signal_uniform = jnp.interp(ln_uniform, lnwave, signal, left=0.0, right=0.0)
+    convolved_uniform = _convolve_same_length(signal_uniform, kern)
+    return jnp.interp(lnwave, ln_uniform, convolved_uniform, left=0.0, right=0.0)
 
 
 def _fe_template_component(wave, wave_template, flux_template, norm, fwhm_kms, shift_frac, base_fwhm_kms=900.0):
@@ -331,11 +365,8 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     bc = jnp.where(wave <= lam_be, bc, 0.0)
 
     lnwave = jnp.log(wave)
-    dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(balmer_vel / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kernel = _gaussian_kernel1d(sigma_pix)
-    bc_conv = _convolve_same_length(bc, kernel)
+    bc_conv = _convolve_velocity_space(lnwave, bc, sigma_ln)
     return bc_conv
 
 
@@ -593,6 +624,7 @@ def build_fsps_template_grid(
     dsps_ssp_fn: str = 'tempdata.h5',
     z_qso: float = 0.0,
     build_physical_host_basis: bool = True,
+    template_norms: Sequence[float] | None = None,
 ) -> FSPSTemplateGrid:
     """Build a host-galaxy SSP template matrix on the observed wavelength grid."""
     # Parameters kept for API compatibility.
@@ -610,20 +642,33 @@ def build_fsps_template_grid(
     wave_out = np.asarray(wave_out, dtype=float)
     age_grid_gyr = np.asarray(age_grid_gyr, dtype=float)
     logzsol_grid = np.asarray(logzsol_grid, dtype=float)
+    template_norms_arr = None if template_norms is None else np.asarray(template_norms, dtype=float)
+    expected_templates = int(age_grid_gyr.size * logzsol_grid.size)
+    if template_norms_arr is not None and template_norms_arr.size != expected_templates:
+        raise ValueError(
+            "template_norms must match the age x metallicity template grid: "
+            f"got {template_norms_arr.size}, expected {expected_templates}."
+        )
     target_lg_age = np.log10(np.clip(age_grid_gyr, 1e-5, None))
     target_lgmet = _map_logzsol_to_dsps_lgmet(logzsol_grid, ssp_lgmet)
 
     tmpl = []
     meta = []
+    itemp = 0
     for i_z, logz in enumerate(logzsol_grid):
         imet = int(np.argmin(np.abs(ssp_lgmet - target_lgmet[i_z])))
         for i_a, age in enumerate(age_grid_gyr):
             iage = int(np.argmin(np.abs(ssp_lg_age_gyr - target_lg_age[i_a])))
             spec_native = np.asarray(ssp_flux[imet, iage, :], dtype=float)
             spec_interp = np.interp(wave_out, ssp_wave, spec_native, left=0.0, right=0.0)
-            norm = np.nanmedian(np.abs(spec_interp))
-            if not np.isfinite(norm) or norm <= 0:
-                norm = 1.0
+            if template_norms_arr is None:
+                norm = np.nanmedian(np.abs(spec_interp))
+                if not np.isfinite(norm) or norm <= 0:
+                    norm = 1.0
+            else:
+                norm = float(template_norms_arr[itemp])
+                if not np.isfinite(norm) or norm <= 0:
+                    raise ValueError("template_norms entries must be finite and positive.")
             spec_interp = spec_interp / norm
             tmpl.append(spec_interp)
             meta.append({
@@ -633,6 +678,7 @@ def build_fsps_template_grid(
                 'dsps_lgmet': float(ssp_lgmet[imet]),
                 'dsps_lg_age_gyr': float(ssp_lg_age_gyr[iage]),
             })
+            itemp += 1
 
     templates = np.column_stack(tmpl)
     t_obs_gyr = _cosmic_age_gyr(z_qso)
@@ -673,6 +719,7 @@ def reconstruct_posterior_components(
     fe_op_wave: np.ndarray,
     fe_op_flux: np.ndarray,
     custom_components: Sequence[CustomComponentSpec] | None = None,
+    template_norms: Sequence[float] | None = None,
     n_draws: int | None = None,
     return_components: bool = True,
     decompose_host: bool = True,
@@ -688,6 +735,7 @@ def reconstruct_posterior_components(
             age_grid_gyr=age_grid_gyr,
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,
+            template_norms=template_norms,
         )
         templates = np.asarray(fsps_grid.templates, dtype=float)
     else:
@@ -734,8 +782,13 @@ def reconstruct_posterior_components(
     balmer_tau = np.asarray(samples.get('Balmer_Tau', np.full(n_total, 0.5)), dtype=float)[sl]
     balmer_vel = np.asarray(samples.get('Balmer_vel', np.full(n_total, 3000.0)), dtype=float)[sl]
 
+    if prior_config.get("PL_pivot", None) is None and np.any(np.asarray(pl_norm, dtype=float) != 0.0):
+        raise ValueError(
+            "Posterior reconstruction with power-law samples requires "
+            "prior_config['PL_pivot'] from the fitted wavelength grid."
+        )
     pl_pivot = float(np.asarray(_resolve_pl_pivot(wave_out, prior_config), dtype=float))
-    reddening_ebv = np.asarray(samples.get('reddening_ebv', np.zeros(n_total)), dtype=float)[sl]
+    reddening_a2500 = np.asarray(samples.get('reddening_a2500', np.zeros(n_total)), dtype=float)[sl]
     reddening_uv_ref = float(prior_config.get('reddening_uv_ref', 2500.0))
     reddening_alpha = float(prior_config.get('reddening_alpha', 1.2))
     if fit_poly and fit_poly_order > 0:
@@ -753,7 +806,7 @@ def reconstruct_posterior_components(
     poly_coeffs_j = jnp.asarray(poly_coeffs, dtype=jnp.float64)
     poly_powers_j = None
     if fit_poly and fit_poly_order > 0:
-        w0 = 0.5 * (wave_out[0] + wave_out[-1])
+        w0 = float(np.asarray(_resolve_poly_pivot(wave_out, prior_config, require_configured=True), dtype=float))
         x = (wave_out - w0) / max(w0, 1.0)
         poly_powers_j = jnp.asarray(
             np.vstack([x ** k for k in range(1, fit_poly_order + 1)]),
@@ -775,7 +828,7 @@ def reconstruct_posterior_components(
         balmer_norm_i,
         balmer_tau_i,
         balmer_vel_i,
-        reddening_ebv_i,
+        reddening_a2500_i,
         poly_coeffs_i,
     ):
         host_intrinsic = templates_j @ weights_i
@@ -787,13 +840,15 @@ def reconstruct_posterior_components(
             pl_slope=pl_slope_i,
             pivot=pl_pivot,
         )
+        reddening_atten = jnp.ones_like(wave_j)
         if fit_reddening:
-            pl_model = pl_model * _smc_like_reddening_jax(
+            reddening_atten = _smc_like_reddening_jax(
                 wave_j,
-                reddening_ebv_i,
+                reddening_a2500_i,
                 uv_ref=reddening_uv_ref,
                 alpha=reddening_alpha,
             )
+            pl_model = pl_model * reddening_atten
         fe_uv_model = _fe_template_component(
             wave_j,
             jnp.asarray(fe_uv_wave, dtype=jnp.float64),
@@ -811,6 +866,10 @@ def reconstruct_posterior_components(
             fe_op_shift_i,
         )
         bc_model = _balmer_continuum_jax(wave_j, balmer_norm_i, 15000.0, balmer_tau_i, balmer_vel_i)
+        if fit_reddening:
+            fe_uv_model = fe_uv_model * reddening_atten
+            fe_op_model = fe_op_model * reddening_atten
+            bc_model = bc_model * reddening_atten
 
         poly_model = jnp.ones_like(wave_j)
         if fit_poly:
@@ -825,7 +884,7 @@ def reconstruct_posterior_components(
         fe_op_model = fe_op_model * poly_model
         bc_model = bc_model * poly_model
         continuum_model = pl_model + fe_uv_model + fe_op_model + bc_model + host_model
-        return host_model, pl_model, fe_uv_model, fe_op_model, bc_model, continuum_model, poly_model
+        return host_model, pl_model, fe_uv_model, fe_op_model, bc_model, continuum_model, poly_model, reddening_atten
 
     (
         host_draws,
@@ -835,6 +894,7 @@ def reconstruct_posterior_components(
         bc_draws,
         continuum_draws,
         poly_draws,
+        reddening_atten_draws,
     ) = jax.vmap(_one_builtin_components)(
         fsps_weights_j,
         jnp.asarray(pl_norm, dtype=jnp.float64),
@@ -850,7 +910,7 @@ def reconstruct_posterior_components(
         jnp.asarray(balmer_norm, dtype=jnp.float64),
         jnp.asarray(balmer_tau, dtype=jnp.float64),
         jnp.asarray(balmer_vel, dtype=jnp.float64),
-        jnp.asarray(reddening_ebv, dtype=jnp.float64),
+        jnp.asarray(reddening_a2500, dtype=jnp.float64),
         poly_coeffs_j,
     )
 
@@ -863,6 +923,7 @@ def reconstruct_posterior_components(
         'continuum': np.asarray(continuum_draws, dtype=float),
     }
     poly_draws_np = np.asarray(poly_draws, dtype=float)
+    reddening_atten_draws_np = np.asarray(reddening_atten_draws, dtype=float)
     custom_total_draws = np.zeros((n_use, wave_out.size), dtype=float)
     for comp in custom_components:
         comp_draws = np.zeros((n_use, wave_out.size), dtype=float)
@@ -874,7 +935,7 @@ def reconstruct_posterior_components(
             comp_draw = np.asarray(
                 _evaluate_custom_component_jax(wave_out, samples, comp, _sample_value),
                 dtype=float,
-            ) * poly_draws_np[i]
+            ) * reddening_atten_draws_np[i] * poly_draws_np[i]
             comp_draws[i] = comp_draw
             custom_total_draws[i] = custom_total_draws[i] + comp_draw
         component_draws[comp.output_name] = comp_draws
@@ -1187,11 +1248,14 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         pl_norm = numpyro.sample('PL_norm', dist.HalfNormal(_cfg_halfnorm('PL_norm')))
         pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
         pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
-        reddening_ebv = numpyro.sample('reddening_ebv', dist.HalfNormal(_cfg_halfnorm('reddening_ebv'))) if fit_reddening else jnp.asarray(0.0)
+        reddening_a2500 = (
+            numpyro.sample('reddening_a2500', dist.HalfNormal(_cfg_halfnorm('reddening_a2500')))
+            if fit_reddening else jnp.asarray(0.0)
+        )
     else:
         pl_norm = jnp.asarray(0.0)
         pl_slope = jnp.asarray(0.0)
-        reddening_ebv = jnp.asarray(0.0)
+        reddening_a2500 = jnp.asarray(0.0)
         if decompose_host:
             frac_host = jnp.asarray(1.0)
 
@@ -1234,7 +1298,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     reddening_atten = (
         _smc_like_reddening_jax(
             wave,
-            reddening_ebv,
+            reddening_a2500,
             uv_ref=float(prior_config.get('reddening_uv_ref', 2500.0)),
             alpha=float(prior_config.get('reddening_alpha', 1.2)),
         )
@@ -1251,9 +1315,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     else:
         bc_model_intrinsic = jnp.zeros_like(wave)
     pl_model = pl_model_intrinsic * reddening_atten
-    fe_uv_model = fe_uv_model_intrinsic
-    fe_op_model = fe_op_model_intrinsic
-    bc_model = bc_model_intrinsic
+    fe_uv_model = fe_uv_model_intrinsic * reddening_atten
+    fe_op_model = fe_op_model_intrinsic * reddening_atten
+    bc_model = bc_model_intrinsic * reddening_atten
     custom_models = {}
     custom_total_model = jnp.zeros_like(wave)
     for comp in custom_components:
@@ -1264,12 +1328,13 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             return _sample_from_prior_config(key, cfg)
 
         custom_model_intrinsic = _evaluate_custom_component_jax(wave, prior_config, comp, _sample_value)
-        custom_models[comp.output_name] = custom_model_intrinsic
-        custom_total_model = custom_total_model + custom_model_intrinsic
+        custom_model = custom_model_intrinsic * reddening_atten
+        custom_models[comp.output_name] = custom_model
+        custom_total_model = custom_total_model + custom_model
     poly_model = jnp.ones_like(wave)
     if fit_poly:
         poly_order = int(max(fit_poly_order, 0))
-        w0 = 0.5 * (wave[0] + wave[-1])
+        w0 = _resolve_poly_pivot(wave, prior_config)
         x = (wave - w0) / jnp.maximum(w0, 1.0)
         # Global low-order tilt
         poly_base = jnp.ones_like(wave)
@@ -1298,7 +1363,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             if fit_reddening:
                 pl_flux_lum = pl_flux_lum * _smc_like_reddening_jax(
                     jnp.asarray(wave_lum),
-                    reddening_ebv,
+                    reddening_a2500,
                     uv_ref=float(prior_config.get('reddening_uv_ref', 2500.0)),
                     alpha=float(prior_config.get('reddening_alpha', 1.2)),
                 )
@@ -1354,7 +1419,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         else:
             custom_line_narrow_intrinsic = custom_line_narrow_intrinsic + custom_line_model
 
-    line_components_are_split = return_line_components or use_psf_phot
+    line_components_are_split = return_line_components or use_psf_phot or fit_reddening
     if use_lines and tied_line_meta['n_lines'] > 0:
         n_v = tied_line_meta['n_vgroups']
         n_w = tied_line_meta['n_wgroups']
@@ -1449,9 +1514,14 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         line_model_intrinsic = custom_line_broad_intrinsic + custom_line_narrow_intrinsic
 
     gal_model = gal_model_intrinsic
-    line_model_broad = line_model_broad_intrinsic
+    line_model_broad = line_model_broad_intrinsic * reddening_atten
     line_model_narrow = line_model_narrow_intrinsic
-    line_model = line_model_intrinsic
+    line_model = line_model_broad + line_model_narrow if line_components_are_split else line_model_intrinsic
+    custom_line_models = {
+        comp.output_name: custom_line_models[comp.output_name]
+        * (reddening_atten if comp.line_kind == 'broad' else 1.0)
+        for comp in custom_line_components
+    }
     if fit_poly:
         gal_model = gal_model * poly_model
         if line_components_are_split:
@@ -1503,6 +1573,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             numpyro.sample(f'psf_mag_obs_{i}', dist.Normal(m_syn, sig), obs=psf_mags[i])
 
     if emit_deterministics:
+        numpyro.deterministic('reddening_a2500', reddening_a2500)
         numpyro.deterministic('f_pl_model', pl_model)
         numpyro.deterministic('f_fe_mgii_model', fe_uv_model)
         numpyro.deterministic('f_fe_balmer_model', fe_op_model)
