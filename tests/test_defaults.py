@@ -74,7 +74,16 @@ def test_build_default_prior_config_uses_explicit_dist_fields():
     assert cfg["host_redshift_prior"]["highz_scale_mult"] == 0.05
     assert cfg["host_redshift_prior"]["lowz_df"] == 3.0
     assert cfg["host_redshift_prior"]["highz_df"] == 20.0
+    assert cfg["log_Fe_uv_norm"]["dist"] == "LogNormal"
+    assert np.isclose(cfg["log_Fe_uv_norm"]["loc"], np.log(0.03 * 2.0))
+    assert cfg["log_Fe_uv_norm"]["scale"] == 1.0
+    assert cfg["log_Fe_op_over_uv"] == {"dist": "Normal", "loc": 0.0, "scale": 1.0}
     assert cfg["log_Fe_uv_FWHM"]["dist"] == "LogNormal"
+    assert np.isclose(cfg["log_Fe_uv_FWHM"]["loc"], np.log(3000.0))
+    assert cfg["log_Fe_uv_FWHM"]["scale"] == 0.5
+    assert cfg["log_Fe_op_FWHM"]["dist"] == "LogNormal"
+    assert np.isclose(cfg["log_Fe_op_FWHM"]["loc"], np.log(3000.0))
+    assert cfg["log_Fe_op_FWHM"]["scale"] == 0.5
     assert cfg["Fe_uv_shift"]["dist"] == "Normal"
     assert cfg["frac_jitter"]["dist"] == "HalfNormal"
     assert cfg["add_jitter"]["dist"] == "HalfNormal"
