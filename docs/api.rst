@@ -31,6 +31,12 @@ Configuration
    LineConfig
    InferenceConfig
    OutputConfig
+   PriorConfig
+   ContinuumPriorConfig
+   HostPriorConfig
+   LinePriorConfig
+   FeIIPriorConfig
+   PSFPriorConfig
    fit_config_from_mapping
 
 Model defaults

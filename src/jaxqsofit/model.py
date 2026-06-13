@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import extinction
@@ -103,7 +103,7 @@ def _format_wave_label(w0):
 
 def _continuum_output_waves_from_prior_config(prior_config, *, default_waves=(2500.0, 4200.0, 5100.0)):
     """Return unique continuum output wavelengths, always preserving 2500 A."""
-    out_params = prior_config.get("out_params", {}) if isinstance(prior_config, dict) else {}
+    out_params = prior_config.get("out_params", {}) if isinstance(prior_config, Mapping) else {}
     waves = np.asarray(out_params.get("cont_loc", []), dtype=float)
     waves = waves[np.isfinite(waves)]
     if waves.size == 0:
@@ -190,7 +190,7 @@ def _powerlaw_jax(wave, pl_norm, pl_slope, pivot):
 
 def _host_redshift_prior_params(prior_config, z_qso):
     """Return smooth redshift-dependent host prior weight, loc shift, scale multiplier, and df."""
-    cfg = prior_config.get("host_redshift_prior", {}) if isinstance(prior_config, dict) else {}
+    cfg = prior_config.get("host_redshift_prior", {}) if isinstance(prior_config, Mapping) else {}
     if not bool(cfg.get("enabled", True)):
         return jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(1.0), None
     z_mid = jnp.asarray(float(cfg.get("z_mid", 1.0)))

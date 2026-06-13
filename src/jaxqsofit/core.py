@@ -31,6 +31,7 @@ from .config import (
     PreprocessingConfig,
     PSFPhotometryData,
     FitConfig,
+    PriorConfig,
     SpectroscopyData,
 )
 from .custom_components import (
@@ -63,6 +64,17 @@ from .model import (
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
+
+
+def _materialize_prior_config(prior_config) -> dict:
+    """Return a mutable flat prior mapping for low-level model code."""
+    if prior_config is None:
+        return {}
+    if isinstance(prior_config, PriorConfig):
+        return prior_config.to_mapping()
+    if hasattr(prior_config, "to_mapping"):
+        return dict(prior_config.to_mapping())
+    return dict(prior_config)
 
 
 def _get_sdss_filters():
@@ -478,6 +490,8 @@ class JAXQSOFit:
             return value.to_state()
         if isinstance(value, CustomLineComponentSpec):
             return value.to_state()
+        if hasattr(value, "to_mapping"):
+            return JAXQSOFit._serialize_for_hdf5(value.to_mapping())
         if isinstance(value, dict):
             return {str(k): JAXQSOFit._serialize_for_hdf5(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
@@ -782,7 +796,7 @@ class JAXQSOFit:
 
         prior_config = getattr(self, "_fit_prior_config", None)
         if prior_config is None:
-            prior_config = build_default_prior_config(flux)
+            prior_config = _materialize_prior_config(build_default_prior_config(flux))
         custom_components = normalize_custom_components(getattr(self, "_fit_custom_components", ()))
         custom_line_components = normalize_custom_line_components(getattr(self, "_fit_custom_line_components", ()))
         prior_config = inject_default_custom_component_priors(prior_config, flux, custom_components)
@@ -884,6 +898,10 @@ class JAXQSOFit:
                 self._write_hdf5_node(meta_grp, str(key), value)
         print(f"Saved posterior bundle: {out_file}")
         return out_file
+
+    def save(self, path=None, *, save_name=None):
+        """Persist posterior samples and fit metadata to a compact bundle."""
+        return self.save_posterior_bundle(save_name=save_name, save_path=path)
 
     @staticmethod
     def _build_fsps_grid_for_fit(wave, age_grid_gyr, logzsol_grid, dsps_ssp_fn, decompose_host, z_qso=0.0):
@@ -1017,104 +1035,20 @@ class JAXQSOFit:
             obj.plot_mcmc_diagnostics(**diag_kwargs)
         return obj
 
-    def fit(self, name=None, deredden=None,
-            wave_range=None, wave_mask=None, save_fits_name=None,
-            fit_lines=None, save_result=None, plot_fig=None, save_fig=None,
-            show_plot=None,
-            decompose_host=None,
-            fit_pl=None,
-            fit_fe=None,
-            fit_bc=None,
-            fit_bal=None,
-            fit_poly=None,
-            fit_reddening=None,
-            fit_poly_order=None,
-            mask_lya_forest=None,
-            verbose=True,
-            fsps_age_grid=None,
-            fsps_logzsol_grid=None,
-            host_sfh_model=None,
-            prior_config=None,
-            dsps_ssp_fn=None,
-            nuts_warmup=None,
-            nuts_samples=None,
-            nuts_chains=None,
-            nuts_target_accept=None,
-            optax_steps=None,
-            optax_lr=None,
-            psf_mags=None,
-            psf_mag_errs=None,
-            psf_bands=None,
-            use_psf_phot=None,
-            custom_components=None,
-            custom_line_components=None,
-            plot_init=None,
-            kwargs_plot=None):
+    load = load_from_samples
+
+    def fit(self, *, verbose=True, kwargs_plot=None):
         """Run preprocessing, inference, persistence, and plotting.
 
-        The primary API is configuration-first: construct ``JAXQSOFit`` with a
-        :class:`jaxqsofit.config.FitConfig`, then call ``fit()``. Keyword
-        arguments here are one-off overrides for the corresponding config
-        fields and are resolved before any preprocessing starts.
+        The public API is configuration-first: construct ``JAXQSOFit`` with a
+        :class:`jaxqsofit.config.FitConfig`, then call ``fit()``. Model choices,
+        preprocessing, inference settings, output behavior, PSF recalibration
+        data, and priors all live on the config object.
 
         Parameters
         ----------
-        name : str or None, optional
-            Override ``config.output.save_name`` for output naming.
-        deredden : bool, optional
-            Override ``config.observation.apply_mw_deredden``.
-        wave_range : tuple[float, float] or None, optional
-            Override ``config.preprocessing.wave_range``.
-        wave_mask : array-like or None, optional
-            Override ``config.preprocessing.wave_mask``.
-        save_fits_name : str or None, optional
-            Override basename for saved result table.
-        fit_lines : bool, optional
-            Override ``config.lines.enabled``.
-        save_result : bool, optional
-            Override ``config.output.save_result``.
-        plot_fig : bool, optional
-            Override ``config.output.plot_fig``.
-        save_fig : bool, optional
-            Override ``config.output.save_fig``.
-        show_plot : bool, optional
-            Override ``config.output.show_plot``.
-        decompose_host : bool, optional
-            Override ``config.host.enabled``.
-        fit_pl, fit_fe, fit_bc, fit_bal, fit_poly, fit_reddening : bool, optional
-            Override the matching ``config.continuum`` component switches.
-        fit_poly_order : int, optional
-            Override ``config.continuum.polynomial_order``.
-        mask_lya_forest : bool, optional
-            Override ``config.preprocessing.mask_lya_forest``.
         verbose : bool, optional
             Verbose optimizer output where applicable.
-        fsps_age_grid, fsps_logzsol_grid : sequence of float, optional
-            Override ``config.host`` SSP grid settings.
-        host_sfh_model : {'flexible', 'delayed'} or None, optional
-            Override ``config.host.sfh_model``.
-        prior_config : dict or None, optional
-            Override ``config.prior_config``.
-        dsps_ssp_fn : str, optional
-            Override ``config.host.dsps_ssp_fn``.
-        nuts_warmup, nuts_samples, nuts_chains, nuts_target_accept : optional
-            Override the corresponding ``config.inference`` NUTS settings.
-        optax_steps, optax_lr : optional
-            Override the corresponding ``config.inference`` Optax settings.
-        psf_mags, psf_mag_errs : array-like, optional
-            Override ``config.psf_photometry`` magnitudes and errors.
-        psf_bands : sequence of str or None, optional
-            Override ``config.psf_photometry.filter_names``.
-        use_psf_phot : bool, optional
-            Enable PSF-photometry likelihood. Defaults to True when
-            ``config.psf_photometry`` is present. This is a spectral
-            recalibration constraint; PSF bands must overlap the observed
-            spectral wavelength range. For full joint spectral + SED modeling,
-            use ``jaxsedfit``.
-        custom_components, custom_line_components : sequence or None, optional
-            Override ``config.lines`` custom component collections.
-        plot_init : bool, optional
-            Override ``config.inference.plot_init``.
         kwargs_plot : dict or None, optional
             Extra keyword arguments passed to :meth:`plot_fig`.
 
@@ -1136,51 +1070,51 @@ class JAXQSOFit:
         out_cfg = cfg.output
         psf_cfg = cfg.psf_photometry
 
-        name = out_cfg.save_name if name is None else name
-        deredden = bool(obs_cfg.apply_mw_deredden if deredden is None else deredden)
-        wave_range = prep_cfg.wave_range if wave_range is None else wave_range
-        wave_mask = prep_cfg.wave_mask if wave_mask is None else wave_mask
-        mask_lya_forest = bool(prep_cfg.mask_lya_forest if mask_lya_forest is None else mask_lya_forest)
-
-        fit_lines = bool(line_cfg.enabled if fit_lines is None else fit_lines)
-        decompose_host = bool(host_cfg.enabled if decompose_host is None else decompose_host)
-        fit_pl = bool(cont_cfg.fit_power_law if fit_pl is None else fit_pl)
-        fit_fe = bool(cont_cfg.fit_feii if fit_fe is None else fit_fe)
-        fit_bc = bool(cont_cfg.fit_balmer_continuum if fit_bc is None else fit_bc)
-        fit_bal = bool(cont_cfg.fit_bal_absorption if fit_bal is None else fit_bal)
-        fit_poly = bool(cont_cfg.fit_polynomial_tilt if fit_poly is None else fit_poly)
-        fit_reddening = bool(cont_cfg.fit_reddening if fit_reddening is None else fit_reddening)
-        fit_poly_order = int(cont_cfg.polynomial_order if fit_poly_order is None else fit_poly_order)
-
+        name = out_cfg.save_name
+        deredden = bool(obs_cfg.apply_mw_deredden)
+        wave_range = prep_cfg.wave_range
+        wave_mask = prep_cfg.wave_mask
+        mask_lya_forest = bool(prep_cfg.mask_lya_forest)
+        fit_lines = bool(line_cfg.enabled)
+        decompose_host = bool(host_cfg.enabled)
+        fit_pl = bool(cont_cfg.fit_power_law)
+        fit_fe = bool(cont_cfg.fit_feii)
+        fit_bc = bool(cont_cfg.fit_balmer_continuum)
+        fit_bal = bool(cont_cfg.fit_bal_absorption)
+        fit_poly = bool(cont_cfg.fit_polynomial_tilt)
+        fit_reddening = bool(cont_cfg.fit_reddening)
+        fit_poly_order = int(cont_cfg.polynomial_order)
         method = str(infer_cfg.method)
-        fsps_age_grid = host_cfg.age_grid_gyr if fsps_age_grid is None else fsps_age_grid
-        fsps_logzsol_grid = host_cfg.logzsol_grid if fsps_logzsol_grid is None else fsps_logzsol_grid
-        host_sfh_model = host_cfg.sfh_model if host_sfh_model is None else host_sfh_model
-        dsps_ssp_fn = host_cfg.dsps_ssp_fn if dsps_ssp_fn is None else dsps_ssp_fn
-        nuts_warmup = int(infer_cfg.num_warmup if nuts_warmup is None else nuts_warmup)
-        nuts_samples = int(infer_cfg.num_samples if nuts_samples is None else nuts_samples)
-        nuts_chains = int(infer_cfg.num_chains if nuts_chains is None else nuts_chains)
-        nuts_target_accept = float(infer_cfg.target_accept_prob if nuts_target_accept is None else nuts_target_accept)
-        optax_steps = int(infer_cfg.map_steps if optax_steps is None else optax_steps)
-        optax_lr = float(infer_cfg.learning_rate if optax_lr is None else optax_lr)
-        plot_init = bool(infer_cfg.plot_init if plot_init is None else plot_init)
-
-        if prior_config is None:
-            prior_config = None if cfg.prior_config is None else dict(cfg.prior_config)
+        fsps_age_grid = host_cfg.age_grid_gyr
+        fsps_logzsol_grid = host_cfg.logzsol_grid
+        host_sfh_model = str(host_cfg.sfh_model)
+        dsps_ssp_fn = host_cfg.dsps_ssp_fn
+        nuts_warmup = int(infer_cfg.num_warmup)
+        nuts_samples = int(infer_cfg.num_samples)
+        nuts_chains = int(infer_cfg.num_chains)
+        nuts_target_accept = float(infer_cfg.target_accept_prob)
+        optax_steps = int(infer_cfg.map_steps)
+        optax_lr = float(infer_cfg.learning_rate)
+        plot_init = bool(infer_cfg.plot_init)
+        prior_config = None if cfg.prior_config is None else _materialize_prior_config(cfg.prior_config)
         if psf_cfg is not None:
-            psf_mags = psf_cfg.magnitudes if psf_mags is None else psf_mags
-            psf_mag_errs = psf_cfg.magnitude_errors if psf_mag_errs is None else psf_mag_errs
-            psf_bands = psf_cfg.filter_names if psf_bands is None else psf_bands
-        use_psf_phot = bool((psf_cfg is not None) if use_psf_phot is None else use_psf_phot)
+            psf_mags = psf_cfg.magnitudes
+            psf_mag_errs = psf_cfg.magnitude_errors
+            psf_bands = psf_cfg.filter_names
+        else:
+            psf_mags = None
+            psf_mag_errs = None
+            psf_bands = None
+        use_psf_phot = bool(psf_cfg is not None)
 
-        save_result = bool(out_cfg.save_result if save_result is None else save_result)
-        plot_fig = bool(out_cfg.plot_fig if plot_fig is None else plot_fig)
-        save_fig = bool(out_cfg.save_fig if save_fig is None else save_fig)
-        show_plot = bool(out_cfg.show_plot if show_plot is None else show_plot)
+        save_result = bool(out_cfg.save_result)
+        plot_fig = bool(out_cfg.plot_fig)
+        save_fig = bool(out_cfg.save_fig)
+        show_plot = bool(out_cfg.show_plot)
         if self.output_path is None and out_cfg.output_path is not None:
             self.output_path = out_cfg.output_path
-        custom_components = line_cfg.custom_components if custom_components is None else custom_components
-        custom_line_components = line_cfg.custom_line_components if custom_line_components is None else custom_line_components
+        custom_components = line_cfg.custom_components
+        custom_line_components = line_cfg.custom_line_components
 
         if kwargs_plot is None:
             kwargs_plot = {}
@@ -1203,7 +1137,7 @@ class JAXQSOFit:
         self._fit_inference_method = str(method)
         self._fit_fsps_age_grid = tuple(fsps_age_grid)
         self._fit_fsps_logzsol_grid = tuple(fsps_logzsol_grid)
-        self._fit_host_sfh_model = None if host_sfh_model is None else str(host_sfh_model)
+        self._fit_host_sfh_model = str(host_sfh_model)
         self._fit_prior_config = prior_config
         self._fit_dsps_ssp_fn = str(dsps_ssp_fn)
         self._fit_use_psf_phot = bool(use_psf_phot)
@@ -1235,8 +1169,7 @@ class JAXQSOFit:
         self.fe_op_wave = fe_op_wave[m]
         self.fe_op_flux = fe_op_flux[m]
 
-        if save_fits_name is None:
-            save_fits_name = self.filename
+        save_fits_name = self.filename
 
         ind_gooderror = np.where((self.err_in > 0) & np.isfinite(self.err_in) & (self.flux_in != 0) & np.isfinite(self.flux_in), True, False)
         self.err = self.err_in[ind_gooderror]
@@ -1263,10 +1196,9 @@ class JAXQSOFit:
         )
 
         if prior_config_input is None:
-            prior_config = build_default_prior_config(self.flux)
+            prior_config = _materialize_prior_config(build_default_prior_config(self.flux))
         prior_config["z_qso"] = float(self.z)
-        if host_sfh_model is not None:
-            prior_config["host_sfh_model"] = str(host_sfh_model)
+        prior_config["host_sfh_model"] = str(host_sfh_model)
         self._fit_host_sfh_model = str(prior_config.get("host_sfh_model", "flexible"))
         prior_config = inject_default_custom_component_priors(
             prior_config=prior_config,
@@ -1447,7 +1379,7 @@ class JAXQSOFit:
         custom_components = normalize_custom_components(custom_components)
         custom_line_components = normalize_custom_line_components(custom_line_components)
         if prior_config is None:
-            prior_config = build_default_prior_config(flux)
+            prior_config = _materialize_prior_config(build_default_prior_config(flux))
         prior_config = inject_default_custom_component_priors(prior_config, flux, custom_components)
         prior_config = inject_default_custom_line_component_priors(prior_config, flux, custom_line_components)
         conti_priors = prior_config.get('conti_priors', {})
@@ -1684,7 +1616,7 @@ class JAXQSOFit:
         custom_components = normalize_custom_components(custom_components)
         custom_line_components = normalize_custom_line_components(custom_line_components)
         if prior_config is None:
-            prior_config = build_default_prior_config(flux)
+            prior_config = _materialize_prior_config(build_default_prior_config(flux))
         prior_config = inject_default_custom_component_priors(prior_config, flux, custom_components)
         prior_config = inject_default_custom_line_component_priors(prior_config, flux, custom_line_components)
         conti_priors = prior_config.get('conti_priors', {})
@@ -2550,8 +2482,9 @@ class JAXQSOFit:
             raise ValueError(
                 "Galactic dereddening requires valid sky coordinates: "
                 f"received ra={ra_f}, dec={dec_f}. "
-                "Pass real source coordinates in `FitConfig.observation` or call `fit(deredden=False)` "
-                "for synthetic data or spectra without sky positions."
+                "Pass real source coordinates in `FitConfig.observation` or set "
+                "`FitConfig.observation.apply_mw_deredden=False` for synthetic "
+                "data or spectra without sky positions."
             )
         return ra_f, dec_f
 
@@ -2723,7 +2656,7 @@ class JAXQSOFit:
 
         prior_config = getattr(self, '_fit_prior_config', None)
         if prior_config is None:
-            prior_config = build_default_prior_config(np.asarray(self.flux, dtype=float))
+            prior_config = _materialize_prior_config(build_default_prior_config(np.asarray(self.flux, dtype=float)))
         else:
             prior_config = dict(prior_config)
         if prior_config.get("PL_pivot", None) is None:

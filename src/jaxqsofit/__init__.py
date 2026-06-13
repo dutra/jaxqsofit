@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from .config import (
     ContinuumConfig,
+    ContinuumPriorConfig,
+    FeIIPriorConfig,
     HostConfig,
+    HostPriorConfig,
     InferenceConfig,
     LineConfig,
+    LinePriorConfig,
     Observation,
     OutputConfig,
     PreprocessingConfig,
     PSFPhotometryData,
+    PSFPriorConfig,
     FitConfig,
+    PriorConfig,
     SpectroscopyData,
     fit_config_from_mapping,
 )
@@ -22,12 +28,19 @@ __all__ = [
     "PSFPhotometryData",
     "PreprocessingConfig",
     "ContinuumConfig",
+    "ContinuumPriorConfig",
+    "FeIIPriorConfig",
     "HostConfig",
+    "HostPriorConfig",
     "LineConfig",
+    "LinePriorConfig",
     "InferenceConfig",
     "OutputConfig",
     "fit_config_from_mapping",
+    "PriorConfig",
+    "PSFPriorConfig",
     "load_from_samples",
+    "load",
     "CustomComponentSpec",
     "CustomLineComponentSpec",
     "make_custom_component",
@@ -51,10 +64,10 @@ def __getattr__(name):
         from .core import JAXQSOFit
 
         return JAXQSOFit
-    if name == "load_from_samples":
+    if name in {"load_from_samples", "load"}:
         from .core import JAXQSOFit
 
-        return JAXQSOFit.load_from_samples
+        return JAXQSOFit.load
     if name in {
         "CustomComponentSpec",
         "CustomLineComponentSpec",
