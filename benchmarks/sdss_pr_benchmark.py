@@ -72,30 +72,28 @@ def _fit_once(
     optax_lr: float,
     dsps_ssp_fn: str,
 ) -> dict[str, Any]:
-    from jaxqsofit import QSOFit, build_default_prior_config
+    from jaxqsofit import JAXQSOFit, build_default_prior_config
 
     prior_config = build_default_prior_config(flux)
-    q = QSOFit(lam=lam, flux=flux, err=err, z=z, ra=184.0307, dec=-2.2383)
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=z, ra=184.0307, dec=-2.2383)
+    q.config.observation.apply_mw_deredden = False
+    q.config.lines.enabled = True
+    q.config.host.enabled = True
+    q.config.host.dsps_ssp_fn = dsps_ssp_fn
+    q.config.continuum.fit_feii = False
+    q.config.continuum.fit_balmer_continuum = False
+    q.config.continuum.fit_polynomial_tilt = True
+    q.config.inference.method = "optax"
+    q.config.inference.map_steps = int(optax_steps)
+    q.config.inference.learning_rate = float(optax_lr)
+    q.config.output.plot_fig = False
+    q.config.output.save_fig = False
+    q.config.output.save_result = False
+    q.config.output.show_plot = False
+    q.config.prior_config = prior_config
 
     _, fit_seconds = _time_call(
-        lambda: q.fit(
-            deredden=False,
-            fit_method="optax",
-            fit_lines=True,
-            decompose_host=True,
-            fit_fe=False,
-            fit_bc=False,
-            fit_poly=True,
-            plot_fig=False,
-            save_fig=False,
-            save_result=False,
-            show_plot=False,
-            prior_config=prior_config,
-            dsps_ssp_fn=dsps_ssp_fn,
-            optax_steps=optax_steps,
-            optax_lr=optax_lr,
-            verbose=False,
-        ),
+        lambda: q.fit(verbose=False),
     )
 
     resid = np.asarray(q.flux, dtype=float) - np.asarray(q.model_total, dtype=float)
