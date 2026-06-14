@@ -10,6 +10,7 @@ Primary Interface
 
 - :class:`jaxqsofit.JAXQSOFit`
 - :class:`jaxqsofit.FitConfig`
+- :class:`jaxqsofit.FitResult`
 - :func:`jaxqsofit.load_from_samples`
 
 API Sections
