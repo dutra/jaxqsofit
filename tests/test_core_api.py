@@ -499,6 +499,21 @@ def test_load_from_samples_roundtrip(tmp_path, monkeypatch):
     assert called["plot_mcmc_diagnostics"] == 1
 
 
+def test_plot_spectrum_delegates_to_plot_fig(monkeypatch):
+    q = object.__new__(JAXQSOFit)
+    calls = {}
+
+    def _plot_fig(self, **kwargs):
+        calls["plot_fig"] = (self, kwargs)
+        return "figure"
+
+    monkeypatch.setattr(JAXQSOFit, "plot_fig", _plot_fig)
+
+    assert q.plot_spectrum(show_plot=False, plot_legend=False) == "figure"
+    assert calls["plot_fig"][0] is q
+    assert calls["plot_fig"][1] == {"show_plot": False, "plot_legend": False}
+
+
 def test_plot_trace_show_plot_false_skips_plt_show(monkeypatch):
     lam, flux, err = _make_simple_spectrum()
     q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)

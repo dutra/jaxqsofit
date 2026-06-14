@@ -17,9 +17,14 @@ from jaxqsofit.model import (
     _extract_line_table_from_prior_config,
     _luminosity_distance_cm_jax,
     _shift_and_broaden_single_spectrum_lnlam,
+    build_host_template_grid,
     build_fsps_template_grid,
+    build_tied_line_metadata,
     build_tied_line_meta_from_linelist,
+    negative_bal_component,
+    quasar_spectral_model,
     qso_fsps_joint_model,
+    reconstruct_spectral_components,
     reconstruct_posterior_components,
 )
 
@@ -40,6 +45,48 @@ def test_extract_line_table_from_prior_config_layouts():
 
 def test_package_enables_jax_x64_explicitly():
     assert jax.config.jax_enable_x64 is True
+
+
+def test_public_model_names_delegate_to_legacy_implementations(monkeypatch):
+    calls = {}
+
+    def _legacy_model(*args, **kwargs):
+        calls["model"] = (args, kwargs)
+        return "model"
+
+    def _reconstruct(*args, **kwargs):
+        calls["reconstruct"] = (args, kwargs)
+        return "components"
+
+    def _grid(*args, **kwargs):
+        calls["grid"] = (args, kwargs)
+        return "grid"
+
+    def _line_meta(*args, **kwargs):
+        calls["line_meta"] = (args, kwargs)
+        return "line_meta"
+
+    def _bal(*args, **kwargs):
+        calls["bal"] = (args, kwargs)
+        return "bal"
+
+    monkeypatch.setattr(model_mod, "qso_fsps_joint_model", _legacy_model)
+    monkeypatch.setattr(model_mod, "reconstruct_posterior_components", _reconstruct)
+    monkeypatch.setattr(model_mod, "build_fsps_template_grid", _grid)
+    monkeypatch.setattr(model_mod, "build_tied_line_meta_from_linelist", _line_meta)
+    monkeypatch.setattr(model_mod, "negative_gaussian_bal_component", _bal)
+
+    assert quasar_spectral_model("wave", fit_pl=True) == "model"
+    assert reconstruct_spectral_components("samples", n_draws=2) == "components"
+    assert build_host_template_grid(dsps_ssp_fn="tempdata.h5") == "grid"
+    assert build_tied_line_metadata([], "wave") == "line_meta"
+    assert negative_bal_component("wave", params={}, metadata={}) == "bal"
+    assert calls["model"][0] == ("wave",)
+    assert calls["model"][1]["fit_pl"] is True
+    assert calls["reconstruct"][1]["n_draws"] == 2
+    assert calls["grid"][1]["dsps_ssp_fn"] == "tempdata.h5"
+    assert calls["line_meta"][0] == ([], "wave")
+    assert calls["bal"][1]["metadata"] == {}
 
 
 def test_reddening_a2500_site_is_unique_when_sampled():
