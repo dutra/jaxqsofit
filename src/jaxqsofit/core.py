@@ -62,7 +62,7 @@ from .model import (
     reconstruct_posterior_components,
     unred,
 )
-from .results import FitResult, median_mapping
+from .results import FitResult, _PosteriorState, median_mapping
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
@@ -177,6 +177,117 @@ class JAXQSOFit:
         self.psf_filter_curves = None
         self.use_psf_phot = False
         self.ebv_mw = np.nan
+        self._posterior_state = _PosteriorState()
+
+    def _ensure_posterior_state(self) -> _PosteriorState:
+        """Return the internal posterior state, creating it for legacy objects."""
+        state = self.__dict__.get("_posterior_state")
+        if state is None:
+            state = _PosteriorState()
+            self.__dict__["_posterior_state"] = state
+        return state
+
+    def _sync_posterior_state_from_legacy_attrs(self) -> None:
+        """Fold legacy dict-loaded posterior attributes into ``_posterior_state``."""
+        state = self._ensure_posterior_state()
+        attr_map = {
+            "numpyro_samples": "samples",
+            "pred_out": "predictive",
+            "pred_bands": "bands",
+            "fig": "figure",
+            "trace_fig": "trace_figure",
+            "corner_fig": "corner_figure",
+            "_loaded_posterior_path": "path",
+            "_posterior_hydrated": "hydrated",
+            "_resumed_from_samples": "resumed_from_samples",
+        }
+        for attr, field in attr_map.items():
+            if attr in self.__dict__:
+                value = self.__dict__.pop(attr)
+                if field == "path" and value is not None:
+                    value = Path(value)
+                setattr(state, field, value)
+
+    @property
+    def numpyro_samples(self):
+        """Posterior samples mirrored from the internal posterior state."""
+        return self._ensure_posterior_state().samples
+
+    @numpyro_samples.setter
+    def numpyro_samples(self, value) -> None:
+        self._ensure_posterior_state().samples = value
+
+    @property
+    def pred_out(self):
+        """Posterior predictive outputs mirrored from the internal posterior state."""
+        return self._ensure_posterior_state().predictive
+
+    @pred_out.setter
+    def pred_out(self, value) -> None:
+        self._ensure_posterior_state().predictive = value
+
+    @property
+    def pred_bands(self):
+        """Posterior uncertainty bands mirrored from the internal posterior state."""
+        return self._ensure_posterior_state().bands
+
+    @pred_bands.setter
+    def pred_bands(self, value) -> None:
+        self._ensure_posterior_state().bands = value
+
+    @property
+    def fig(self):
+        """Main fitted-spectrum figure mirrored from the internal posterior state."""
+        return self._ensure_posterior_state().figure
+
+    @fig.setter
+    def fig(self, value) -> None:
+        self._ensure_posterior_state().figure = value
+
+    @property
+    def trace_fig(self):
+        """Trace figure mirrored from the internal posterior state."""
+        return self._ensure_posterior_state().trace_figure
+
+    @trace_fig.setter
+    def trace_fig(self, value) -> None:
+        self._ensure_posterior_state().trace_figure = value
+
+    @property
+    def corner_fig(self):
+        """Corner figure mirrored from the internal posterior state."""
+        return self._ensure_posterior_state().corner_figure
+
+    @corner_fig.setter
+    def corner_fig(self, value) -> None:
+        self._ensure_posterior_state().corner_figure = value
+
+    @property
+    def _loaded_posterior_path(self):
+        """Loaded posterior bundle path mirrored from the internal posterior state."""
+        return self._ensure_posterior_state().path
+
+    @_loaded_posterior_path.setter
+    def _loaded_posterior_path(self, value) -> None:
+        self._ensure_posterior_state().path = None if value is None else Path(value)
+
+    @property
+    def _posterior_hydrated(self) -> bool:
+        """Whether posterior-derived products have been reconstructed."""
+        return bool(self._ensure_posterior_state().hydrated)
+
+    @_posterior_hydrated.setter
+    def _posterior_hydrated(self, value: bool) -> None:
+        self._ensure_posterior_state().hydrated = bool(value)
+
+    @property
+    def _resumed_from_samples(self) -> bool:
+        """Whether this fitter was loaded from a posterior bundle."""
+        return bool(self._ensure_posterior_state().resumed_from_samples)
+
+    @_resumed_from_samples.setter
+    def _resumed_from_samples(self, value: bool) -> None:
+        self._ensure_posterior_state().resumed_from_samples = bool(value)
 
     @classmethod
     def from_arrays(
@@ -785,7 +896,7 @@ class JAXQSOFit:
             and hasattr(self, "f_conti_model")
             and hasattr(self, "f_line_model")
             and hasattr(self, "host")
-            and hasattr(self, "pred_bands")
+            and self.pred_bands is not None
         )
         if has_cached:
             self._posterior_hydrated = True
@@ -883,9 +994,10 @@ class JAXQSOFit:
             decompose_host=decompose_host,
         )
 
-    def save_posterior_bundle(self, save_name=None, save_path=None):
+    def save_posterior_bundle(self, save_name=None, save_path=None, *, _state: _PosteriorState | None = None):
         """Persist posterior samples plus minimal metadata for compact reloads."""
-        if not hasattr(self, "numpyro_samples") or self.numpyro_samples is None:
+        state = self._ensure_posterior_state() if _state is None else _state
+        if state.samples is None:
             raise RuntimeError("No posterior samples available. Run fit() before saving a posterior bundle.")
         meta = self._collect_sample_bundle_meta()
 
@@ -893,7 +1005,7 @@ class JAXQSOFit:
         with h5py.File(out_file, "w") as h5f:
             h5f.attrs["posterior_bundle_format"] = "jaxqsofit_samples_meta_v1"
             samples_grp = h5f.create_group("samples")
-            for name, draws in self.numpyro_samples.items():
+            for name, draws in state.samples.items():
                 arr = np.asarray(draws)
                 ds_kwargs = {}
                 if arr.ndim > 0:
@@ -904,11 +1016,12 @@ class JAXQSOFit:
             for key, value in meta.items():
                 self._write_hdf5_node(meta_grp, str(key), value)
         print(f"Saved posterior bundle: {out_file}")
+        state.path = Path(out_file)
         return out_file
 
-    def save(self, path=None, *, save_name=None):
+    def save(self, path=None, *, save_name=None, _state: _PosteriorState | None = None):
         """Persist posterior samples and fit metadata to a compact bundle."""
-        return self.save_posterior_bundle(save_name=save_name, save_path=path)
+        return self.save_posterior_bundle(save_name=save_name, save_path=path, _state=_state)
 
     @staticmethod
     def _build_fsps_grid_for_fit(wave, age_grid_gyr, logzsol_grid, dsps_ssp_fn, decompose_host, z_qso=0.0):
@@ -1023,6 +1136,7 @@ class JAXQSOFit:
             psf_bands=state.get("psf_bands"),
         )
         obj.__dict__.update(state)
+        obj._sync_posterior_state_from_legacy_attrs()
         obj._resumed_from_samples = True
         obj.install_path = os.path.dirname(os.path.abspath(__file__))
         if not hasattr(obj, "verbose"):
@@ -1054,16 +1168,24 @@ class JAXQSOFit:
         figure=None,
     ) -> FitResult:
         """Build a public result object from the current mirrored fit state."""
-        samples = getattr(self, "numpyro_samples", None)
+        state = self._ensure_posterior_state()
+        if method is not None:
+            state.method = str(method)
+        if path is not None:
+            state.path = Path(path)
+        if figure is not None:
+            state.figure = figure
+        samples = state.samples
         median = median_mapping(samples)
         return FitResult(
             fitter=self,
             samples=samples,
             median=median,
-            method=str(method if method is not None else getattr(self, "_fit_inference_method", "unknown")),
+            method=str(state.method if state.method is not None else getattr(self, "_fit_inference_method", "unknown")),
             summary=dict(median),
-            path=None if path is None else Path(path),
-            figure=figure,
+            path=state.path,
+            figure=state.figure,
+            _state=state,
         )
 
     @classmethod
@@ -1122,6 +1244,7 @@ class JAXQSOFit:
         fit_reddening = bool(cont_cfg.fit_reddening)
         fit_poly_order = int(cont_cfg.polynomial_order)
         method = str(infer_cfg.method)
+        self._posterior_state = _PosteriorState(method=method)
         fsps_age_grid = host_cfg.age_grid_gyr
         fsps_logzsol_grid = host_cfg.logzsol_grid
         host_sfh_model = str(host_cfg.sfh_model)
@@ -2641,6 +2764,7 @@ class JAXQSOFit:
         wave_max=None,
         n_draws=None,
         return_components=True,
+        _state: _PosteriorState | None = None,
     ):
         """Rebuild posterior component draws on a requested rest-frame grid.
 
@@ -2658,7 +2782,8 @@ class JAXQSOFit:
             If True, include per-component draws and medians in the return value.
             This includes any fitted custom components.
         """
-        if not hasattr(self, 'numpyro_samples') or self.numpyro_samples is None:
+        state = self._ensure_posterior_state() if _state is None else _state
+        if state.samples is None:
             raise RuntimeError("No posterior samples available. Run fit() first.")
         has_age_grid = hasattr(self, '_fit_fsps_age_grid')
         has_logz_grid = hasattr(self, '_fit_fsps_logzsol_grid')
@@ -2702,14 +2827,14 @@ class JAXQSOFit:
         age_grid_gyr, logzsol_grid, dsps_ssp_fn = self._require_posterior_bundle_fsps_metadata(self.__dict__)
         expected_templates = int(len(age_grid_gyr) * len(logzsol_grid))
         self._validate_fsps_weights_shape(
-            getattr(self, 'pred_out', None),
+            state.predictive,
             expected_templates=expected_templates,
             context="Posterior reconstruction",
         )
         return reconstruct_posterior_components(
             wave_out=wave_out,
-            samples=self.numpyro_samples,
-            pred_out=getattr(self, 'pred_out', None),
+            samples=state.samples,
+            pred_out=state.predictive,
             age_grid_gyr=age_grid_gyr,
             logzsol_grid=logzsol_grid,
             dsps_ssp_fn=dsps_ssp_fn,

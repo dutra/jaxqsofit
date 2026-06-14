@@ -22,6 +22,22 @@ def median_mapping(values: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 @dataclass
+class _PosteriorState:
+    """Internal mutable posterior state produced by a jaxqsofit run."""
+
+    method: str | None = None
+    samples: Mapping[str, Any] | None = None
+    predictive: Mapping[str, Any] | None = None
+    bands: Mapping[str, Any] | None = None
+    path: Path | None = None
+    figure: Any = None
+    trace_figure: Any = None
+    corner_figure: Any = None
+    hydrated: bool = False
+    resumed_from_samples: bool = False
+
+
+@dataclass
 class PredictionResult:
     """Dict-like posterior prediction or reconstruction result."""
 
@@ -60,14 +76,21 @@ class FitResult:
     summary: Mapping[str, Any] | None = None
     path: Path | None = None
     figure: Any = None
+    _state: _PosteriorState | None = field(default=None, repr=False, compare=False)
 
     def predict(self, **kwargs) -> PredictionResult:
         """Reconstruct posterior spectral components for this fit."""
+        if self._state is not None:
+            kwargs.setdefault("_state", self._state)
         return PredictionResult(self.fitter.reconstruct_posterior_spectrum(**kwargs), fitter=self.fitter)
 
     def save(self, path: str | Path | None = None, **kwargs) -> Path:
         """Save the result with the fitter's native persistence format."""
+        if self._state is not None:
+            kwargs.setdefault("_state", self._state)
         self.path = Path(self.fitter.save(path, **kwargs))
+        if self._state is not None:
+            self._state.path = self.path
         return self.path
 
     def plot_corner(self, **kwargs):
