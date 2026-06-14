@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import glob
 from dataclasses import replace
+from pathlib import Path
 
 import extinction
 import h5py
@@ -61,6 +62,7 @@ from .model import (
     reconstruct_posterior_components,
     unred,
 )
+from .results import FitResult, median_mapping
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
@@ -1029,6 +1031,7 @@ class JAXQSOFit:
             obj.save_fig = False
         if not hasattr(obj, "SN_ratio_conti"):
             obj.SN_ratio_conti = np.nan
+        obj._loaded_posterior_path = bundle_path
         obj._ensure_hydrated_from_samples()
 
         if plot_fig:
@@ -1042,6 +1045,35 @@ class JAXQSOFit:
         return obj
 
     load = load_from_samples
+
+    def _make_result(
+        self,
+        *,
+        method: str | None = None,
+        path=None,
+        figure=None,
+    ) -> FitResult:
+        """Build a public result object from the current mirrored fit state."""
+        samples = getattr(self, "numpyro_samples", None)
+        median = median_mapping(samples)
+        return FitResult(
+            fitter=self,
+            samples=samples,
+            median=median,
+            method=str(method if method is not None else getattr(self, "_fit_inference_method", "unknown")),
+            summary=dict(median),
+            path=None if path is None else Path(path),
+            figure=figure,
+        )
+
+    @classmethod
+    def load_result(cls, *args, **kwargs) -> FitResult:
+        """Load a posterior bundle and wrap it in a :class:`FitResult`."""
+        fitter = cls.load(*args, **kwargs)
+        return fitter._make_result(
+            method=getattr(fitter, "_fit_inference_method", "loaded"),
+            path=getattr(fitter, "_loaded_posterior_path", None),
+        )
 
     def fit(self, *, verbose=True, kwargs_plot=None):
         """Run preprocessing, inference, persistence, and plotting.
@@ -1060,10 +1092,9 @@ class JAXQSOFit:
 
         Returns
         -------
-        dict
-            Contains the fitter object, posterior samples when available, the
-            saved posterior-bundle path when written, and the matplotlib figure
-            when plotted.
+        FitResult
+            Result object exposing samples, medians, persistence, and plotting
+            helpers while the fitter keeps mirrored posterior state.
         """
 
         cfg = self.config
@@ -1325,12 +1356,11 @@ class JAXQSOFit:
             posterior_bundle_path = self.save_posterior_bundle()
         if plot_fig:
             self.plot_fig(**kwargs_plot)
-        return {
-            "fitter": self,
-            "samples": getattr(self, "numpyro_samples", None),
-            "posterior_bundle_path": posterior_bundle_path,
-            "figure": getattr(self, "fig", None),
-        }
+        return self._make_result(
+            method=method,
+            path=posterior_bundle_path,
+            figure=getattr(self, "fig", None),
+        )
 
     def run_fsps_numpyro_fit(self, num_warmup=500, num_samples=1000, num_chains=1,
                              target_accept_prob=0.9,

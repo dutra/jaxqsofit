@@ -23,9 +23,11 @@ from .config import (
 __all__ = [
     "JAXQSOFit",
     "FitConfig",
+    "FitResult",
     "Observation",
     "SpectroscopyData",
     "PSFPhotometryData",
+    "PredictionResult",
     "PreprocessingConfig",
     "ContinuumConfig",
     "ContinuumPriorConfig",
@@ -64,6 +66,10 @@ def __getattr__(name):
         from .core import JAXQSOFit
 
         return JAXQSOFit
+    if name in {"FitResult", "PredictionResult"}:
+        from . import results as _results
+
+        return getattr(_results, name)
     if name in {"load_from_samples", "load"}:
         from .core import JAXQSOFit
 

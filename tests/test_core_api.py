@@ -8,6 +8,7 @@ import jaxqsofit
 import jaxqsofit.core as coremod
 import jaxqsofit.model as modelmod
 from jaxqsofit import JAXQSOFit, build_default_prior_config
+from jaxqsofit.results import FitResult, PredictionResult
 
 
 def _make_simple_spectrum(n=64):
@@ -240,8 +241,10 @@ def test_fit_dispatch_nuts(monkeypatch):
         magnitude_errors=np.array([0.05, 0.06]),
         filter_names=["g", "r"],
     )
-    q.fit()
+    result = q.fit()
 
+    assert isinstance(result, FitResult)
+    assert result.method == "nuts"
     assert called['nuts'] == 1
     assert called['kwargs']['use_psf_phot'] is True
     assert called['kwargs']['psf_mags'].shape == (2,)
@@ -497,6 +500,48 @@ def test_load_from_samples_roundtrip(tmp_path, monkeypatch):
     assert np.allclose(loaded.host, 0.0)
     assert called["plot_fig"] == 1
     assert called["plot_mcmc_diagnostics"] == 1
+
+
+def test_load_result_wraps_loaded_qsofit(tmp_path, monkeypatch):
+    q, _lam, _flux, _err = _build_bundle_source(tmp_path, "unit_test_fit_result", decompose_host=False)
+    saved_path = q.save_posterior_bundle()
+
+    monkeypatch.setattr(JAXQSOFit, "plot_fig", lambda self, **kwargs: None)
+    monkeypatch.setattr(JAXQSOFit, "plot_mcmc_diagnostics", lambda self, **kwargs: None)
+
+    result = JAXQSOFit.load_result(filename="unit_test_fit_result", output_path=str(tmp_path))
+
+    assert isinstance(result, FitResult)
+    assert isinstance(result.fitter, JAXQSOFit)
+    assert os.fspath(result.path) == os.fspath(saved_path)
+    assert set(result.samples) == {"cont_norm", "log_frac_host", "PL_norm", "PL_slope"}
+    assert np.isclose(result.median["PL_norm"], 1.0)
+
+
+def test_fit_result_save_and_plot_delegates(tmp_path, monkeypatch):
+    q, _lam, _flux, _err = _build_bundle_source(tmp_path, "unit_test_result_methods", decompose_host=False)
+    result = q._make_result(method="optax")
+    calls = {"trace": None, "corner": None}
+
+    def _trace(**kwargs):
+        calls["trace"] = kwargs
+        return "trace"
+
+    def _corner(**kwargs):
+        calls["corner"] = kwargs
+        return "corner"
+
+    monkeypatch.setattr(q, "plot_trace", _trace)
+    monkeypatch.setattr(q, "plot_corner", _corner)
+
+    saved_path = result.save(tmp_path, save_name="manual_result")
+
+    assert os.fspath(result.path) == os.fspath(saved_path)
+    assert os.path.exists(saved_path)
+    assert result.plot_trace(show_plot=False) == "trace"
+    assert result.plot_corner(show_plot=False) == "corner"
+    assert calls["trace"]["show_plot"] is False
+    assert calls["corner"]["show_plot"] is False
 
 
 def test_plot_spectrum_delegates_to_plot_fig(monkeypatch):
@@ -888,6 +933,7 @@ def test_reconstruct_posterior_spectrum_delegates_to_model_helper(monkeypatch):
     monkeypatch.setattr(coremod, "reconstruct_posterior_components", _stub_reconstruct)
 
     out = q.reconstruct_posterior_spectrum(wave_min=2500.0, n_draws=2, return_components=False)
+    result_pred = q._make_result(method="nuts").predict(wave_min=2500.0, n_draws=2, return_components=False)
 
     assert "wave_out" in captured
     assert captured["samples"] is q.numpyro_samples
@@ -902,6 +948,9 @@ def test_reconstruct_posterior_spectrum_delegates_to_model_helper(monkeypatch):
     assert captured["n_draws"] == 2
     assert captured["return_components"] is False
     assert np.isclose(np.min(captured["wave_out"]), 2500.0)
+    assert isinstance(result_pred, PredictionResult)
+    assert "continuum" in result_pred["draws"]
+    assert "continuum" in result_pred.median["median"]
     dln = np.diff(np.log(captured["wave_out"]))
     assert np.allclose(dln, dln[0], rtol=1e-6)
     assert np.allclose(out["wave"], captured["wave_out"])

@@ -44,6 +44,8 @@ The ``fluxes`` and ``errors`` arrays should be in units of
    )
    q = JAXQSOFit(cfg)
    result = q.fit()
+   result.samples
+   result.plot_corner(show_plot=False)
 
 Fast mode
 ---------
@@ -56,6 +58,7 @@ For a fast MAP-style fit, use:
    q.config.inference.map_steps = 1500
    q.config.inference.learning_rate = 1e-2
    result = q.fit()
+   result.save("fit_outputs")
 
 Hybrid mode
 -----------
@@ -69,3 +72,4 @@ Warm-start with Optax, then run NUTS:
    q.config.inference.num_warmup = 200
    q.config.inference.num_samples = 400
    result = q.fit()
+   components = result.predict(n_draws=200)
