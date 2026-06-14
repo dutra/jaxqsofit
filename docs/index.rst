@@ -11,4 +11,4 @@ with joint AGN + host galaxy decomposition.
    installation
    quickstart
    tutorials
-   api
+   api/index
