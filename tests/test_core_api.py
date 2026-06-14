@@ -45,7 +45,7 @@ def _build_bundle_source(tmp_path, filename, decompose_host):
     q.fe_uv_flux = np.array([0.0, 0.0])
     q.fe_op_wave = np.array([3500.0, 7000.0])
     q.fe_op_flux = np.array([0.0, 0.0])
-    q._fit_prior_config = build_default_prior_config(flux)
+    q._fit_prior_config = build_default_prior_config(flux).to_mapping()
     q._fit_prior_config["host_sfh_model"] = "flexible"
     q._fit_fsps_age_grid = (0.1, 1.0)
     q._fit_fsps_logzsol_grid = (-0.5, 0.0)
@@ -231,16 +231,16 @@ def test_fit_dispatch_nuts(monkeypatch):
     monkeypatch.setattr(q, 'run_fsps_numpyro_fit', _stub_nuts)
 
     q.config.inference.method = 'nuts'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        save_result=False,
-        prior_config=build_default_prior_config(flux),
-        psf_mags=np.array([19.8, 19.6]),
-        psf_mag_errs=np.array([0.05, 0.06]),
-        psf_bands=["g", "r"],
-        use_psf_phot=True,
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = build_default_prior_config(flux)
+    q.config.psf_photometry = coremod.PSFPhotometryData(
+        magnitudes=np.array([19.8, 19.6]),
+        magnitude_errors=np.array([0.05, 0.06]),
+        filter_names=["g", "r"],
     )
+    q.fit()
 
     assert called['nuts'] == 1
     assert called['kwargs']['use_psf_phot'] is True
@@ -268,16 +268,16 @@ def test_fit_dispatch_nuts_dereddens_psf_phot_when_enabled(monkeypatch):
     monkeypatch.setattr(q, '_de_redden', _stub_deredden)
 
     q.config.inference.method = 'nuts'
-    q.fit(
-        deredden=True,
-        plot_fig=False,
-        save_result=False,
-        prior_config=build_default_prior_config(flux),
-        psf_mags=np.array([19.8, 19.6]),
-        psf_mag_errs=np.array([0.05, 0.06]),
-        psf_bands=["g", "r"],
-        use_psf_phot=True,
+    q.config.observation.apply_mw_deredden = True
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = build_default_prior_config(flux)
+    q.config.psf_photometry = coremod.PSFPhotometryData(
+        magnitudes=np.array([19.8, 19.6]),
+        magnitude_errors=np.array([0.05, 0.06]),
+        filter_names=["g", "r"],
     )
+    q.fit()
 
     assert called['nuts'] == 1
     assert called['kwargs']['use_psf_phot'] is True
@@ -299,13 +299,12 @@ def test_fit_dispatch_optax(monkeypatch):
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
     q.config.inference.method = 'optax'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        plot_init=True,
-        save_result=False,
-        prior_config=build_default_prior_config(flux),
-    )
+    q.config.inference.plot_init = True
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = build_default_prior_config(flux)
+    q.fit()
 
     assert called['optax'] == 1
     assert called['kwargs']['plot_init'] is True
@@ -324,12 +323,11 @@ def test_fit_builds_default_priors_from_rest_frame_flux(monkeypatch):
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
     q.config.inference.method = 'optax'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        save_result=False,
-        prior_config=None,
-    )
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = None
+    q.fit()
 
     prior_config = called['kwargs']['prior_config']
     expected_rest_fscale = np.nanmedian(np.abs(flux * (1.0 + z)))
@@ -353,13 +351,12 @@ def test_fit_bal_appends_builtin_bal_components(monkeypatch):
     monkeypatch.setattr(q, 'run_fsps_optax_fit', _stub_optax)
 
     q.config.inference.method = 'optax'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        save_result=False,
-        fit_bal=True,
-        prior_config=build_default_prior_config(flux),
-    )
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.continuum.fit_bal_absorption = True
+    q.config.prior_config = build_default_prior_config(flux)
+    q.fit()
 
     assert called['optax'] == 1
     names = [comp.name for comp in called['kwargs']['custom_components']]
@@ -379,13 +376,12 @@ def test_fit_dispatch_optax_nuts(monkeypatch):
     monkeypatch.setattr(q, 'run_fsps_optax_nuts_fit', _stub_optax_nuts)
 
     q.config.inference.method = 'optax+nuts'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        plot_init=True,
-        save_result=False,
-        prior_config=build_default_prior_config(flux),
-    )
+    q.config.inference.plot_init = True
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = build_default_prior_config(flux)
+    q.fit()
 
     assert called['optax_nuts'] == 1
     assert called['kwargs']['plot_init'] is True
@@ -400,12 +396,11 @@ def test_fit_materializes_default_pl_pivot_to_numeric(monkeypatch):
     cfg = build_default_prior_config(flux)
     assert cfg["PL_pivot"] is None
     q.config.inference.method = 'optax'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        save_result=False,
-        prior_config=cfg,
-    )
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = cfg
+    q.fit()
 
     pivot = q._fit_prior_config["PL_pivot"]
     assert isinstance(pivot, float)
@@ -422,12 +417,11 @@ def test_fit_preserves_explicit_pl_pivot_value(monkeypatch):
     monkeypatch.setattr(q, 'run_fsps_optax_fit', lambda **kwargs: None)
 
     q.config.inference.method = 'optax'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        save_result=False,
-        prior_config=build_default_prior_config(flux, pl_pivot=3000.0),
-    )
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = build_default_prior_config(flux, pl_pivot=3000.0)
+    q.fit()
 
     assert q._fit_prior_config["PL_pivot"] == 3000.0
     assert isinstance(q._fit_prior_config["poly_pivot"], float)
@@ -442,12 +436,11 @@ def test_fit_materializes_missing_pl_pivot_key(monkeypatch):
     cfg = build_default_prior_config(flux)
     cfg.pop("PL_pivot")
     q.config.inference.method = 'optax'
-    q.fit(
-        deredden=False,
-        plot_fig=False,
-        save_result=False,
-        prior_config=cfg,
-    )
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = cfg
+    q.fit()
 
     pivot = q._fit_prior_config["PL_pivot"]
     assert isinstance(pivot, float)
@@ -460,13 +453,12 @@ def test_inference_method_unknown_raises():
     q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
 
     q.config.inference.method = 'not-a-method'
+    q.config.observation.apply_mw_deredden = False
+    q.config.output.plot_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = build_default_prior_config(flux)
     with pytest.raises(ValueError, match='Unknown inference method'):
-        q.fit(
-            deredden=False,
-            plot_fig=False,
-            save_result=False,
-            prior_config=build_default_prior_config(flux),
-        )
+        q.fit()
 
 
 def test_load_from_samples_roundtrip(tmp_path, monkeypatch):

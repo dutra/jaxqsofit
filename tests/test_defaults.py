@@ -1,11 +1,52 @@
 import numpy as np
 
+from jaxqsofit.config import (
+    ContinuumPriorConfig,
+    FeIIPriorConfig,
+    FitConfig,
+    HostConfig,
+    HostPriorConfig,
+    LinePriorConfig,
+    Observation,
+    PriorConfig,
+    SpectroscopyData,
+)
 from jaxqsofit.defaults import (
     DEFAULT_ELG_NARROW_LINE_PRIOR_ROWS,
     DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS,
     build_default_bal_components,
     build_default_prior_config,
 )
+
+
+def test_prior_config_object_exposes_flat_mapping():
+    prior = PriorConfig(
+        continuum=ContinuumPriorConfig(power_law_pivot=3000.0, polynomial_pivot=2800.0),
+        host=HostPriorConfig(redshift_weight_enabled=False),
+        lines=LinePriorConfig(dmu_scale_mult=0.2, sig_scale_mult=0.3, amp_scale_mult=0.4),
+        feii=FeIIPriorConfig(uv_fwhm={"loc": np.log(1000.0), "scale": 0.2}),
+    )
+    prior["PL_slope"] = {"loc": -1.5, "scale": 0.3}
+
+    assert prior["PL_pivot"] == 3000.0
+    assert prior["poly_pivot"] == 2800.0
+    assert prior["host_redshift_prior"]["enabled"] is False
+    assert prior["line_dmu_scale_mult"] == 0.2
+    assert prior["log_Fe_uv_FWHM"]["scale"] == 0.2
+    assert prior.get("PL_slope") == {"loc": -1.5, "scale": 0.3}
+
+
+def test_fit_config_coerces_prior_config_mapping():
+    cfg = FitConfig(
+        observation=Observation(redshift=0.1),
+        spectroscopy=SpectroscopyData(wave_obs=[4000.0, 5000.0], fluxes=[1.0, 1.1]),
+        host=HostConfig(sfh_model="flexible"),
+        prior_config={"PL_pivot": 2500.0},
+    )
+
+    assert isinstance(cfg.prior_config, PriorConfig)
+    assert cfg.host.sfh_model == "flexible"
+    assert cfg.prior_config["PL_pivot"] == 2500.0
 
 
 def test_build_default_prior_config_has_expected_keys():
@@ -22,7 +63,6 @@ def test_build_default_prior_config_has_expected_keys():
         'log_frac_host',
         'tau_host',
         'raw_w',
-        'host_sfh_model',
         'line_dmu_scale_mult',
         'line_sig_scale_mult',
         'line_amp_scale_mult',
@@ -31,7 +71,7 @@ def test_build_default_prior_config_has_expected_keys():
     ]
     for k in required:
         assert k in cfg
-    assert cfg["host_sfh_model"] == "delayed"
+    assert isinstance(cfg, PriorConfig)
     assert cfg["poly_pivot"] is None
     assert cfg["log_stellar_mass"] == {
         "dist": "TruncatedNormal",

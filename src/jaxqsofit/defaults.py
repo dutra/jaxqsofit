@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from .config import PriorConfig
 from .custom_components import CustomComponentSpec, make_custom_component
 from .model import negative_gaussian_bal_component
 
@@ -71,7 +72,7 @@ def _line_row(
     findex: int,
     fvalue: float,
     vary: int = 1,
-) -> Dict[str, Any]:
+) -> PriorConfig:
     """Build one line-prior row.
 
     Wavelength fields are rest-frame vacuum Angstroms, matching SDSS spectra
@@ -358,7 +359,7 @@ def build_default_prior_config(
     include_high_ionization_lines: bool = False,
     pl_pivot: float | None = None,
 ) -> Dict[str, Any]:
-    """Build a full prior_config with sane defaults from data flux scale.
+    """Build a full PriorConfig with sane defaults from data flux scale.
 
     Parameters
     ----------
@@ -416,7 +417,6 @@ def build_default_prior_config(
         },
         "tau_host": {"dist": "HalfNormal", "scale": 1.0},
         "raw_w": {"dist": "Normal", "loc": -0.5, "scale": 1.0},
-        "host_sfh_model": "delayed",
         "log_stellar_mass": {"dist": "TruncatedNormal", "loc": 9.0, "scale": 0.75, "low": 7.0, "high": 12.0},
         "log_host_aperture_scale": {"dist": "Normal", "loc": 0.0, "scale": 0.5},
         "log_sfh_age_gyr": {"dist": "Normal", "loc": np.log(3.0), "scale": 1.0},
@@ -477,4 +477,4 @@ def build_default_prior_config(
                     )
                 line_cfg["table"] = _apply_robust_line_scale_priors(table, fscale=fscale, fmax=fmax)
     cfg.update(lc)
-    return cfg
+    return PriorConfig(overrides=cfg)

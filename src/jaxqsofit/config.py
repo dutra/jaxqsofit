@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Mapping, Sequence
 
@@ -86,7 +87,7 @@ class HostConfig:
     """Host-galaxy spectral decomposition configuration."""
 
     enabled: bool = True
-    sfh_model: str | None = None
+    sfh_model: str = "delayed"
     dsps_ssp_fn: str = "tempdata.h5"
     age_grid_gyr: Sequence[float] = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0)
     logzsol_grid: Sequence[float] = (-1.0, -0.5, 0.0, 0.2)
@@ -128,6 +129,142 @@ class OutputConfig:
 
 
 @dataclass
+class ContinuumPriorConfig:
+    """Semantic continuum-prior options."""
+
+    power_law_pivot: float | None = None
+    polynomial_pivot: float | None = None
+    output_wavelengths: Sequence[float] | None = None
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        out = dict(self.overrides)
+        if self.power_law_pivot is not None:
+            out["PL_pivot"] = float(self.power_law_pivot)
+        if self.polynomial_pivot is not None:
+            out["poly_pivot"] = float(self.polynomial_pivot)
+        if self.output_wavelengths is not None:
+            out["out_params"] = {"cont_lum_waves": list(self.output_wavelengths)}
+        return out
+
+
+@dataclass
+class HostPriorConfig:
+    """Semantic host-galaxy prior options."""
+
+    redshift_weight_enabled: bool | None = None
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        out = dict(self.overrides)
+        if self.redshift_weight_enabled is not None:
+            host_z = dict(out.get("host_redshift_prior", {}))
+            host_z["enabled"] = bool(self.redshift_weight_enabled)
+            out["host_redshift_prior"] = host_z
+        return out
+
+
+@dataclass
+class LinePriorConfig:
+    """Semantic emission-line prior options."""
+
+    table: Sequence[Mapping[str, Any]] | None = None
+    dmu_scale_mult: float | None = None
+    sig_scale_mult: float | None = None
+    amp_scale_mult: float | None = None
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        out = dict(self.overrides)
+        if self.table is not None:
+            out["line"] = {"table": list(self.table)}
+        if self.dmu_scale_mult is not None:
+            out["line_dmu_scale_mult"] = float(self.dmu_scale_mult)
+        if self.sig_scale_mult is not None:
+            out["line_sig_scale_mult"] = float(self.sig_scale_mult)
+        if self.amp_scale_mult is not None:
+            out["line_amp_scale_mult"] = float(self.amp_scale_mult)
+        return out
+
+
+@dataclass
+class FeIIPriorConfig:
+    """Semantic Fe II prior options."""
+
+    uv_fwhm: Mapping[str, Any] | None = None
+    optical_fwhm: Mapping[str, Any] | None = None
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        out = dict(self.overrides)
+        if self.uv_fwhm is not None:
+            out["log_Fe_uv_FWHM"] = dict(self.uv_fwhm)
+        if self.optical_fwhm is not None:
+            out["log_Fe_op_FWHM"] = dict(self.optical_fwhm)
+        return out
+
+
+@dataclass
+class PSFPriorConfig:
+    """Semantic PSF recalibration prior options."""
+
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return dict(self.overrides)
+
+
+@dataclass
+class PriorConfig(MutableMapping[str, Any]):
+    """Object-oriented prior configuration with dict-compatible overrides."""
+
+    continuum: ContinuumPriorConfig = field(default_factory=ContinuumPriorConfig)
+    host: HostPriorConfig = field(default_factory=HostPriorConfig)
+    lines: LinePriorConfig = field(default_factory=LinePriorConfig)
+    feii: FeIIPriorConfig = field(default_factory=FeIIPriorConfig)
+    psf: PSFPriorConfig = field(default_factory=PSFPriorConfig)
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        out: dict[str, Any] = dict(self.overrides)
+        out.update(self.continuum.to_mapping())
+        out.update(self.host.to_mapping())
+        out.update(self.lines.to_mapping())
+        out.update(self.feii.to_mapping())
+        out.update(self.psf.to_mapping())
+        return out
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_mapping()[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.overrides[str(key)] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in self.overrides:
+            del self.overrides[key]
+            return
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(self.to_mapping())
+
+    def __len__(self) -> int:
+        return len(self.to_mapping())
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.to_mapping()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.to_mapping().get(key, default)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+
+@dataclass
 class FitConfig:
     """Top-level configuration bundle for one JAXQSOFit spectral fit."""
 
@@ -140,7 +277,11 @@ class FitConfig:
     lines: LineConfig = field(default_factory=LineConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
-    prior_config: dict[str, Any] | None = None
+    prior_config: PriorConfig | None = None
+
+    def __post_init__(self) -> None:
+        if self.prior_config is not None:
+            self.prior_config = _coerce_prior_config(self.prior_config)
 
     def validate(self) -> None:
         self.spectroscopy.validate()
@@ -163,6 +304,31 @@ def _coerce_dataclass(cls, value: Any):
     raise TypeError(f"Cannot coerce {type(value)!r} to {cls.__name__}")
 
 
+def _coerce_prior_config(value: Any) -> PriorConfig:
+    if isinstance(value, PriorConfig):
+        return value
+    if value is None:
+        return PriorConfig()
+    if not isinstance(value, Mapping):
+        return _coerce_dataclass(PriorConfig, value)
+    data = dict(value)
+    nested_keys = {"continuum", "host", "lines", "feii", "psf", "overrides"}
+    if any(key in data for key in nested_keys):
+        cfg = PriorConfig(
+            continuum=_coerce_dataclass(ContinuumPriorConfig, data.get("continuum", {})),
+            host=_coerce_dataclass(HostPriorConfig, data.get("host", {})),
+            lines=_coerce_dataclass(LinePriorConfig, data.get("lines", {})),
+            feii=_coerce_dataclass(FeIIPriorConfig, data.get("feii", {})),
+            psf=_coerce_dataclass(PSFPriorConfig, data.get("psf", {})),
+            overrides=dict(data.get("overrides", {})),
+        )
+        for key, item in data.items():
+            if key not in nested_keys:
+                cfg.overrides[key] = item
+        return cfg
+    return PriorConfig(overrides=data)
+
+
 def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
     """Build a validated FitConfig from a nested mapping."""
 
@@ -178,7 +344,7 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         lines=_coerce_dataclass(LineConfig, data.get("lines", {})),
         inference=_coerce_dataclass(InferenceConfig, data.get("inference", {})),
         output=_coerce_dataclass(OutputConfig, data.get("output", {})),
-        prior_config=None if data.get("prior_config") is None else dict(data.get("prior_config", {})),
+        prior_config=None if data.get("prior_config") is None else _coerce_prior_config(data.get("prior_config", {})),
     )
     cfg.validate()
     return cfg

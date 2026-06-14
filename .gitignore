@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+**/.DS_Store
 *.parquet
 *.fits
 *.h5
@@ -79,6 +80,15 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/generated/
+_build/
+plots/
+prior_table*.tex
+test.ipynb
+notebooks/*.pdf
+notebooks/*_samples.pkl
+notebooks/*_corner.pdf
+notebooks/*_trace.pdf
 
 # PyBuilder
 .pybuilder/

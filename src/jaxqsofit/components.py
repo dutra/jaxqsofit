@@ -69,6 +69,8 @@ def _component_prior_config(cfg: SpectralComponentConfig) -> dict[str, Any]:
             include_elg_narrow_lines=bool(cfg.include_elg_narrow_lines),
             include_high_ionization_lines=bool(cfg.include_high_ionization_lines),
         )
+        if hasattr(prior, "to_mapping"):
+            prior = prior.to_mapping()
     else:
         prior = copy.deepcopy(dict(cfg.line_prior_config))
     if cfg.line_table is not None:

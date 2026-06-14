@@ -103,24 +103,23 @@ def test_sdss_fit_wrms_below_threshold():
 
     q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=z, ra=ra, dec=dec)
     q.config.inference.method = "optax+nuts"
-    q.fit(
-        deredden=False,
-        fit_lines=True,
-        decompose_host=True,
-        fit_fe=False,
-        fit_bc=False,
-        fit_poly=True,
-        plot_fig=False,
-        save_fig=False,
-        save_result=False,
-        prior_config=build_default_prior_config(flux),
-        optax_steps=int(os.getenv('JAXQSOFIT_WRMS_OPTAX_STEPS', '300')),
-        optax_lr=float(os.getenv('JAXQSOFIT_WRMS_OPTAX_LR', '1e-2')),
-        nuts_warmup=int(os.getenv('JAXQSOFIT_WRMS_NUTS_WARMUP', '25')),
-        nuts_samples=int(os.getenv('JAXQSOFIT_WRMS_NUTS_SAMPLES', '25')),
-        nuts_chains=1,
-        nuts_target_accept=0.9,
-    )
+    q.config.observation.apply_mw_deredden = False
+    q.config.lines.enabled = True
+    q.config.host.enabled = True
+    q.config.continuum.fit_feii = False
+    q.config.continuum.fit_balmer_continuum = False
+    q.config.continuum.fit_polynomial_tilt = True
+    q.config.output.plot_fig = False
+    q.config.output.save_fig = False
+    q.config.output.save_result = False
+    q.config.prior_config = build_default_prior_config(flux)
+    q.config.inference.map_steps = int(os.getenv('JAXQSOFIT_WRMS_OPTAX_STEPS', '300'))
+    q.config.inference.learning_rate = float(os.getenv('JAXQSOFIT_WRMS_OPTAX_LR', '1e-2'))
+    q.config.inference.num_warmup = int(os.getenv('JAXQSOFIT_WRMS_NUTS_WARMUP', '25'))
+    q.config.inference.num_samples = int(os.getenv('JAXQSOFIT_WRMS_NUTS_SAMPLES', '25'))
+    q.config.inference.num_chains = 1
+    q.config.inference.target_accept_prob = 0.9
+    q.fit()
 
     resid = np.asarray(q.flux) - np.asarray(q.model_total)
     sigma = np.asarray(q.err, dtype=float)
