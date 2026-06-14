@@ -29,6 +29,7 @@ class SpectroscopyData:
     mask: Sequence[bool] | None = None
 
     def validate(self) -> None:
+        """Validate spectroscopy payload array lengths."""
         n = len(self.wave_obs)
         if len(self.fluxes) != n:
             raise ValueError("Spectroscopy fluxes must have the same length as wave_obs.")
@@ -55,6 +56,7 @@ class PSFPhotometryData:
     filter_names: Sequence[str] = ("u", "g", "r", "i", "z")
 
     def validate(self) -> None:
+        """Validate PSF photometry vector lengths."""
         n = len(self.magnitudes)
         if len(self.magnitude_errors) != n or len(self.filter_names) != n:
             raise ValueError("PSF magnitudes, errors, and filter_names must have the same length.")
@@ -138,6 +140,7 @@ class ContinuumPriorConfig:
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_mapping(self) -> dict[str, Any]:
+        """Convert semantic continuum prior settings into model-site keys."""
         out = dict(self.overrides)
         if self.power_law_pivot is not None:
             out["PL_pivot"] = float(self.power_law_pivot)
@@ -156,6 +159,7 @@ class HostPriorConfig:
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_mapping(self) -> dict[str, Any]:
+        """Convert semantic host prior settings into model-site keys."""
         out = dict(self.overrides)
         if self.redshift_weight_enabled is not None:
             host_z = dict(out.get("host_redshift_prior", {}))
@@ -175,6 +179,7 @@ class LinePriorConfig:
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_mapping(self) -> dict[str, Any]:
+        """Convert semantic emission-line prior settings into model-site keys."""
         out = dict(self.overrides)
         if self.table is not None:
             out["line"] = {"table": list(self.table)}
@@ -196,6 +201,7 @@ class FeIIPriorConfig:
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_mapping(self) -> dict[str, Any]:
+        """Convert semantic Fe II prior settings into model-site keys."""
         out = dict(self.overrides)
         if self.uv_fwhm is not None:
             out["log_Fe_uv_FWHM"] = dict(self.uv_fwhm)
@@ -211,6 +217,7 @@ class PSFPriorConfig:
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_mapping(self) -> dict[str, Any]:
+        """Return low-level PSF recalibration prior overrides."""
         return dict(self.overrides)
 
 
@@ -226,6 +233,7 @@ class PriorConfig(MutableMapping[str, Any]):
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def to_mapping(self) -> dict[str, Any]:
+        """Return the flat prior mapping consumed by low-level model code."""
         out: dict[str, Any] = dict(self.overrides)
         out.update(self.continuum.to_mapping())
         out.update(self.host.to_mapping())
@@ -235,30 +243,38 @@ class PriorConfig(MutableMapping[str, Any]):
         return out
 
     def __getitem__(self, key: str) -> Any:
+        """Return one prior entry from the flat mapping view."""
         return self.to_mapping()[key]
 
     def __setitem__(self, key: str, value: Any) -> None:
+        """Store a low-level prior override by model-site key."""
         self.overrides[str(key)] = value
 
     def __delitem__(self, key: str) -> None:
+        """Remove a low-level override entry."""
         if key in self.overrides:
             del self.overrides[key]
             return
         raise KeyError(key)
 
     def __iter__(self):
+        """Iterate over keys in the flat mapping view."""
         return iter(self.to_mapping())
 
     def __len__(self) -> int:
+        """Return the number of entries in the flat mapping view."""
         return len(self.to_mapping())
 
     def __contains__(self, key: object) -> bool:
+        """Return True when a key exists in the flat mapping view."""
         return key in self.to_mapping()
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Return a prior entry or default from the flat mapping view."""
         return self.to_mapping().get(key, default)
 
     def setdefault(self, key: str, default: Any = None) -> Any:
+        """Set and return a low-level override when the key is absent."""
         if key not in self:
             self[key] = default
         return self[key]
@@ -280,19 +296,23 @@ class FitConfig:
     prior_config: PriorConfig | None = None
 
     def __post_init__(self) -> None:
+        """Coerce mapping-style prior configs into :class:`PriorConfig`."""
         if self.prior_config is not None:
             self.prior_config = _coerce_prior_config(self.prior_config)
 
     def validate(self) -> None:
+        """Validate required nested data payloads."""
         self.spectroscopy.validate()
         if self.psf_photometry is not None:
             self.psf_photometry.validate()
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert the dataclass tree into a plain dictionary."""
         return asdict(self)
 
 
 def _coerce_dataclass(cls, value: Any):
+    """Convert an existing instance or mapping into the requested dataclass."""
     if isinstance(value, cls):
         return value
     if isinstance(value, Mapping):
@@ -305,6 +325,7 @@ def _coerce_dataclass(cls, value: Any):
 
 
 def _coerce_prior_config(value: Any) -> PriorConfig:
+    """Coerce flat and nested prior mappings into :class:`PriorConfig`."""
     if isinstance(value, PriorConfig):
         return value
     if value is None:

@@ -131,9 +131,11 @@ def _mw_band_attenuation_factor(wave_obs, filt_trans, ebv, r_v=3.1):
     return numer / denom
 
 class JAXQSOFit:
+    """Config-first spectral fitting interface for quasar spectra."""
+
     _POSTERIOR_BUNDLE_SUFFIX = ".h5"
 
-    def __init__(self, config: FitConfig):
+    def __init__(self, config: "jaxqsofit.config.FitConfig"):
         """Initialize a config-first JAXQSOFit spectral fitter."""
         if not isinstance(config, FitConfig):
             raise TypeError("JAXQSOFit expects a FitConfig. Build one with jaxqsofit.FitConfig(...).")
@@ -529,10 +531,12 @@ class JAXQSOFit:
 
     @staticmethod
     def _hdf5_scalar_string_dtype():
+        """Return the UTF-8 scalar string dtype used in HDF5 bundles."""
         return h5py.string_dtype(encoding="utf-8")
 
     @classmethod
     def _write_hdf5_node(cls, parent, name, value):
+        """Write one recursively serialized Python value into an HDF5 group."""
         value = cls._serialize_for_hdf5(value)
         if value is None:
             grp = parent.create_group(name)
@@ -595,6 +599,7 @@ class JAXQSOFit:
 
     @classmethod
     def _read_hdf5_node(cls, parent, name):
+        """Read one recursively serialized Python value from an HDF5 group."""
         node = parent[name]
         if isinstance(node, h5py.Dataset):
             node_type = node.attrs.get("node_type", "ndarray")
@@ -916,6 +921,7 @@ class JAXQSOFit:
             )
 
         class _DummyFSPSGrid:
+            """Minimal FSPS-like grid used when host decomposition is disabled."""
             pass
 
         wave = np.asarray(wave, dtype=float)
@@ -3542,6 +3548,7 @@ class JAXQSOFit:
         custom_components = list(getattr(self, 'custom_components', {}).items())
 
         def _show_component(arr):
+            """Return True when a component has finite amplitude worth plotting."""
             arr = np.asarray(arr, dtype=float)
             arr = arr[np.isfinite(arr)]
             if arr.size == 0:
@@ -3549,6 +3556,7 @@ class JAXQSOFit:
             return float(np.nanmax(np.abs(arr))) >= comp_floor
 
         def _finite_component_values(*arrays):
+            """Collect finite values from one or more component arrays."""
             vals = []
             for arr in arrays:
                 if arr is None:

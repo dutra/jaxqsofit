@@ -71,6 +71,7 @@ class CustomComponentSpec:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        """Normalize names and validate the continuum component definition."""
         safe_name = _sanitize_component_name(self.name)
         object.__setattr__(self, "name", safe_name)
         if not callable(self.evaluate):
@@ -130,6 +131,7 @@ class CustomLineComponentSpec:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        """Normalize names, validate priors, and canonicalize line kind."""
         safe_name = _sanitize_component_name(self.name)
         object.__setattr__(self, "name", safe_name)
         if not callable(self.evaluate):
@@ -144,20 +146,25 @@ class CustomLineComponentSpec:
 
     @property
     def prefix(self) -> str:
+        """Return the parameter-site prefix used in samples/priors."""
         return f"custom_line_{self.name}"
 
     @property
     def output_name(self) -> str:
+        """Return the public output component key."""
         return self.name
 
     @property
     def deterministic_site_name(self) -> str:
+        """Return the Predictive deterministic site name."""
         return f"{self.prefix}_model"
 
     def site_name(self, param_name: str) -> str:
+        """Return the full NumPyro sample-site name for one local parameter."""
         return f"{self.prefix}_{param_name}"
 
     def to_state(self) -> dict[str, Any]:
+        """Return a pickle-friendly representation."""
         return {
             "__custom_line_component__": True,
             "name": self.name,
@@ -169,6 +176,7 @@ class CustomLineComponentSpec:
 
     @classmethod
     def from_state(cls, state: Mapping[str, Any]) -> "CustomLineComponentSpec":
+        """Rebuild a line component spec from :meth:`to_state`."""
         return cls(
             name=str(state["name"]),
             parameter_priors=dict(state["parameter_priors"]),
