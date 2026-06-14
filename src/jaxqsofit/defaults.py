@@ -306,6 +306,7 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
         sigma: float,
         sigma_scale: float = 0.35,
     ):
+        """Build one negative-Gaussian BAL custom component spec."""
         return make_custom_component(
             name=name,
             parameter_priors={

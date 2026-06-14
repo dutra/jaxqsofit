@@ -26,6 +26,9 @@ autosummary_generate = True
 autodoc_member_order = 'bysource'
 autodoc_class_signature = 'mixed'
 autodoc_typehints = 'description'
+autodoc_type_aliases = {
+    'FitConfig': 'jaxqsofit.config.FitConfig',
+}
 autodoc_preserve_defaults = True
 autodoc_default_options = {
     'members': True,

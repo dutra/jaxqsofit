@@ -58,6 +58,7 @@ class SpectralComponentConfig:
 
 
 def _as_config(config: SpectralComponentConfig | None) -> SpectralComponentConfig:
+    """Return an explicit spectral-component config, filling defaults when absent."""
     return config if isinstance(config, SpectralComponentConfig) else SpectralComponentConfig()
 
 
@@ -80,6 +81,7 @@ def _component_prior_config(cfg: SpectralComponentConfig) -> dict[str, Any]:
 
 
 def _line_table_from_prior_config(prior_config: Mapping[str, Any]):
+    """Extract a line table from supported prior-config layouts."""
     line_cfg = prior_config.get("line", None)
     if isinstance(line_cfg, Mapping):
         if "table" in line_cfg:

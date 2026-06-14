@@ -144,6 +144,7 @@ def _luminosity_distance_cm_jax(z):
     scalar_input = z.ndim == 0
 
     def _one_distance(zi):
+        """Integrate the fixed flat-LCDM luminosity distance for one redshift."""
         grid = jnp.linspace(0.0, jnp.maximum(zi, 1.0e-8), 256)
         dc_mpc = (C_KMS / _LUMINOSITY_H0) * jnp.trapezoid(_ez_inv_flat_lcdm_jax(grid), x=grid)
         return dc_mpc * (1.0 + zi) * MPC_TO_CM
@@ -831,6 +832,7 @@ def reconstruct_posterior_components(
         reddening_a2500_i,
         poly_coeffs_i,
     ):
+        """Evaluate built-in host, continuum, Fe II, Balmer, and polynomial terms for one draw."""
         host_intrinsic = templates_j @ weights_i
         host_model = _shift_and_broaden_single_spectrum_lnlam(lnwave_j, host_intrinsic, gal_v_i, gal_sigma_i)
 
@@ -929,6 +931,7 @@ def reconstruct_posterior_components(
         comp_draws = np.zeros((n_use, wave_out.size), dtype=float)
         for i in range(n_use):
             def _sample_value(samples_dict, key, default=0.0):
+                """Read one custom-component parameter draw with a fallback value."""
                 val = float(np.asarray(samples_dict.get(key, np.full(n_total, default)), dtype=float)[sl][i])
                 return val
 
@@ -1322,6 +1325,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     custom_total_model = jnp.zeros_like(wave)
     for comp in custom_components:
         def _sample_value(sample_dict, key, default=0.0):
+            """Sample one custom continuum-component parameter from prior config."""
             cfg = prior_config.get(key, None)
             if cfg is None:
                 return default
@@ -1407,6 +1411,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     custom_line_narrow_intrinsic = jnp.zeros_like(wave)
     for comp in custom_line_components:
         def _sample_line_value(sample_dict, key, default=0.0):
+            """Sample one custom line-component parameter from prior config."""
             cfg = prior_config.get(key, None)
             if cfg is None:
                 return default

@@ -47,8 +47,6 @@ Model defaults
 
    build_default_prior_config
    build_default_bal_components
-   DEFAULT_LINE_CONFIG
-   DEFAULT_LINE_PRIOR_ROWS
 
 Custom components
 ~~~~~~~~~~~~~~~~~
@@ -61,7 +59,6 @@ Custom components
    make_custom_component
    make_custom_line_component
    make_template_component
-   negative_gaussian_bal_component
 
 Component evaluation
 ~~~~~~~~~~~~~~~~~~~~
@@ -93,6 +90,7 @@ Core
    :show-inheritance:
 
 .. autofunction:: jaxqsofit.load_from_samples
+   :no-index:
 
 Configuration
 -------------
@@ -170,11 +168,14 @@ Defaults
 
 .. autofunction:: build_default_bal_components
 
-.. autodata:: DEFAULT_LINE_CONFIG
-   :annotation:
+.. data:: DEFAULT_LINE_CONFIG
 
-.. autodata:: DEFAULT_LINE_PRIOR_ROWS
-   :annotation:
+   Default emission-line configuration used by
+   :func:`build_default_prior_config`.
+
+.. data:: DEFAULT_LINE_PRIOR_ROWS
+
+   Default line-prior table rows used by :func:`build_default_prior_config`.
 
 Custom Components
 -----------------
@@ -229,8 +230,19 @@ helpers above. The lower-level model module exposes a few reusable utilities.
 
 .. currentmodule:: jaxqsofit.model
 
-.. autofunction:: negative_gaussian_bal_component
+.. autoclass:: FSPSTemplateGrid
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. autofunction:: qso_fsps_joint_model
+
+.. autofunction:: reconstruct_posterior_components
 
 .. autofunction:: build_fsps_template_grid
 
 .. autofunction:: build_tied_line_meta_from_linelist
+
+.. autofunction:: negative_gaussian_bal_component
+
+.. autofunction:: unred
