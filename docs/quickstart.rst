@@ -60,6 +60,9 @@ For a fast MAP-style fit, use:
    result = q.fit()
    result.save("fit_outputs")
 
+When ``save_result=True`` or :meth:`jaxqsofit.FitResult.save` is used,
+``jaxqsofit`` writes an HDF5 posterior bundle named ``<object_id>_samples.h5``.
+
 Hybrid mode
 -----------
 

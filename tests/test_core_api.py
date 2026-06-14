@@ -544,6 +544,19 @@ def test_fit_result_save_and_plot_delegates(tmp_path, monkeypatch):
     assert calls["corner"]["show_plot"] is False
 
 
+def test_fit_result_save_uses_captured_posterior_state(tmp_path):
+    q, _lam, _flux, _err = _build_bundle_source(tmp_path, "unit_test_result_state", decompose_host=False)
+    result = q._make_result(method="optax")
+
+    q._posterior_state = type(q._posterior_state)(method="nuts")
+    q.numpyro_samples = {"cont_norm": np.array([42.0])}
+
+    saved_path = result.save(tmp_path, save_name="captured_state")
+
+    with h5py.File(saved_path, "r") as h5f:
+        np.testing.assert_allclose(h5f["samples"]["cont_norm"][()], [1.0, 1.1, 0.9])
+
+
 def test_plot_spectrum_delegates_to_plot_fig(monkeypatch):
     q = object.__new__(JAXQSOFit)
     calls = {}
