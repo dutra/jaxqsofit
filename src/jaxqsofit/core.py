@@ -3464,6 +3464,15 @@ class JAXQSOFit:
                 show_plot=show_plot,
             )
 
+    def plot_spectrum(self, **kwargs):
+        """Plot the fitted spectrum, model components, and residuals.
+
+        This is the preferred public plotting method. It delegates to
+        :meth:`plot_fig`, which remains available for compatibility with older
+        notebooks.
+        """
+        return self.plot_fig(**kwargs)
+
     def plot_fig(self, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylims=None, plot_residual=True, show_title=True,
                  plot_1sigma=True, sigma_alpha=0.12, show_plot=True, plot_psf_space=False, plot_intrinsic_powerlaw=False):
         """Plot data, model components, line decomposition, and residuals.

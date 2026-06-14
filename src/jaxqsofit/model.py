@@ -1621,3 +1621,33 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
 
     student_t_df = float(prior_config.get('student_t_df', 3.0))
     numpyro.sample('obs', dist.StudentT(df=student_t_df, loc=fiber_model, scale=sigma_tot), obs=flux)
+
+
+def quasar_spectral_model(*args, **kwargs):
+    """NumPyro spectral model for one configured quasar fit.
+
+    This is the preferred public name for the low-level AGN+host spectral
+    model. The historical name :func:`qso_fsps_joint_model` remains available
+    for compatibility.
+    """
+    return qso_fsps_joint_model(*args, **kwargs)
+
+
+def reconstruct_spectral_components(*args, **kwargs):
+    """Reconstruct posterior spectral components on a requested wavelength grid."""
+    return reconstruct_posterior_components(*args, **kwargs)
+
+
+def build_host_template_grid(*args, **kwargs):
+    """Build the host-galaxy template grid used by the spectral model."""
+    return build_fsps_template_grid(*args, **kwargs)
+
+
+def build_tied_line_metadata(*args, **kwargs):
+    """Build tied emission-line metadata from a line-list table."""
+    return build_tied_line_meta_from_linelist(*args, **kwargs)
+
+
+def negative_bal_component(*args, **kwargs):
+    """Evaluate a negative Gaussian broad-absorption-line component."""
+    return negative_gaussian_bal_component(*args, **kwargs)
