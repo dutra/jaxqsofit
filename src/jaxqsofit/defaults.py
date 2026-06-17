@@ -436,8 +436,6 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
                 "shared_parameter_sites": {"v_out": "custom_bal_v_out"},
                 "line_cancellation_threshold": 0.1,
                 "line_cancellation_scale": 0.05,
-                "line_to_continuum_cancellation_threshold": 0.1,
-                "line_to_continuum_cancellation_scale": 0.05,
             },
         )
 
