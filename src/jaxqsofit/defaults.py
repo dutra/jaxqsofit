@@ -436,6 +436,7 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
                 "shared_parameter_sites": {
                     "v_out": "custom_bal_v_out",
                     "tau_peak": "custom_bal_tau_peak",
+                    "covering": "custom_bal_covering",
                 },
             },
         )
