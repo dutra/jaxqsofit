@@ -433,9 +433,10 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
             metadata={
                 "component_type": "bal_absorption",
                 "line_lambda": float(line_lambda),
-                "shared_parameter_sites": {"v_out": "custom_bal_v_out"},
-                "line_cancellation_threshold": 0.1,
-                "line_cancellation_scale": 0.05,
+                "shared_parameter_sites": {
+                    "v_out": "custom_bal_v_out",
+                    "tau_peak": "custom_bal_tau_peak",
+                },
             },
         )
 
@@ -445,7 +446,7 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
         # _bal_component("bal_nv_2", depth_frac=0.025, center=1160.0, scale=90.0, low=1100.0, high=1240.0, sigma=40.0),
         _bal_component("bal_siiv", tau_scale=0.8, line_lambda=1396.76, v_out_loc=6000.0, v_out_scale=2500.0, v_out_low=3000.0, v_out_high=12000.0, sigma=22.0),
         # _bal_component("bal_siiv_2", depth_frac=0.025, center=1320.0, scale=90.0, low=1260.0, high=1397.0, sigma=40.0),
-        _bal_component("bal_civ", tau_scale=1.0, line_lambda=1549.06, v_out_loc=6000.0, v_out_scale=2500.0, v_out_low=3000.0, v_out_high=12000.0, sigma=24.0),
+        _bal_component("bal_civ", tau_scale=0.8, line_lambda=1549.06, v_out_loc=6000.0, v_out_scale=2500.0, v_out_low=3000.0, v_out_high=12000.0, sigma=24.0),
         # _bal_component("bal_civ_2", depth_frac=0.03, center=1450.0, scale=100.0, low=1350.0, high=1549.0, sigma=45.0),
         # not common, often blended with other lines
         # _bal_component("bal_ciii", tau_scale=0.8, line_lambda=1908.73, v_out_loc=9200.0, v_out_scale=8000.0, v_out_low=300.0, v_out_high=25000.0, sigma=30.0),

@@ -247,32 +247,6 @@ def _bal_covering_fraction(params):
     return jnp.clip(jnp.asarray(params.get("covering", 1.0)), 0.0, 0.999)
 
 
-def _apply_bal_line_cancellation_penalty(comp, wave, line_model, component_transmission):
-    """Softly penalize BAL solutions that remove too much local line flux."""
-    metadata = getattr(comp, "metadata", {}) or {}
-    line_threshold = metadata.get("line_cancellation_threshold", None)
-    line_scale = metadata.get("line_cancellation_scale", None)
-    if line_threshold is None or line_scale is None or float(line_scale) <= 0.0:
-        return
-
-    line_flux = jnp.maximum(jnp.asarray(line_model, dtype=jnp.float64), 0.0)
-    absorption_depth = jnp.clip(1.0 - component_transmission, 0.0, 1.0)
-    bal_window = absorption_depth / jnp.maximum(jnp.max(absorption_depth), 1.0e-12)
-    absorbed_line_flux = jnp.trapezoid(line_flux * absorption_depth, wave)
-    local_line_flux = jnp.trapezoid(line_flux * bal_window, wave)
-    local_absorbed_fraction = absorbed_line_flux / jnp.maximum(local_line_flux, 1.0e-30)
-
-    numpyro.deterministic(f"{comp.output_name}_line_absorbed_flux", absorbed_line_flux)
-    numpyro.deterministic(f"{comp.output_name}_local_line_flux", local_line_flux)
-    numpyro.deterministic(f"{comp.output_name}_line_absorbed_fraction", local_absorbed_fraction)
-
-    excess = jnp.maximum(local_absorbed_fraction - float(line_threshold), 0.0)
-    numpyro.factor(
-        f"{comp.output_name}_line_cancellation_penalty",
-        -0.5 * (excess / float(line_scale)) ** 2,
-    )
-
-
 def _smc_like_reddening_jax(wave, a_uv, uv_ref=2500.0, alpha=1.2):
     """Return a smooth SMC-like attenuation curve.
 
@@ -1700,7 +1674,6 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             covering = _bal_covering_fraction(bal_params)
             component_transmission = 1.0 - covering * (1.0 - jnp.exp(-tau_profile))
             component_transmission = jnp.clip(component_transmission, 1.0e-6, 1.0)
-            _apply_bal_line_cancellation_penalty(comp, wave, line_model, component_transmission)
             custom_models[comp.output_name] = bal_reference * (component_transmission - 1.0)
             bal_transmission = bal_transmission * component_transmission
 

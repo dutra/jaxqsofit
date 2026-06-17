@@ -142,13 +142,12 @@ def test_build_default_bal_components_exposes_common_bal_lines():
     assert comps[2].metadata["component_type"] == "bal_absorption"
     assert comps[2].metadata["line_lambda"] == 1549.06
     assert comps[2].metadata["shared_parameter_sites"]["v_out"] == "custom_bal_v_out"
-    assert comps[2].metadata["line_cancellation_threshold"] == 0.1
-    assert comps[2].metadata["line_cancellation_scale"] == 0.05
+    assert comps[2].metadata["shared_parameter_sites"]["tau_peak"] == "custom_bal_tau_peak"
     assert np.isclose(comps[0].parameter_priors["tau_peak"]["scale"], 0.8)
     assert np.isclose(comps[1].parameter_priors["tau_peak"]["scale"], 0.8)
     tau_cfg = comps[2].parameter_priors["tau_peak"]
     assert tau_cfg["dist"] == "HalfNormal"
-    assert np.isclose(tau_cfg["scale"], 1.0)
+    assert np.isclose(tau_cfg["scale"], 0.8)
     covering_cfg = comps[2].parameter_priors["covering"]
     assert covering_cfg["dist"] == "TruncatedNormal"
     assert covering_cfg["loc"] == 0.55
