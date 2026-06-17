@@ -59,7 +59,7 @@ def test_build_default_prior_config_has_expected_keys():
         'PL_slope',
         'PL_pivot',
         'poly_pivot',
-        'reddening_a2500',
+        'log_reddening_a2500',
         'log_frac_host',
         'tau_host',
         'raw_w',
@@ -81,6 +81,9 @@ def test_build_default_prior_config_has_expected_keys():
         "high": 12.0,
     }
     assert cfg["log_host_aperture_scale"] == {"dist": "Normal", "loc": 0.0, "scale": 0.5}
+    assert cfg["log_sfh_tau_over_age"] == {"dist": "Normal", "loc": 0.0, "scale": 0.5}
+    assert cfg["log_gal_sigma_kms"]["dist"] == "Normal"
+    assert cfg["log_reddening_a2500"] == {"dist": "Normal", "loc": np.log(0.1), "scale": 0.6}
 
 
 def test_build_default_prior_config_scales_with_flux_median():
@@ -135,15 +138,29 @@ def test_build_default_bal_components_exposes_common_bal_lines():
     comps = build_default_bal_components(np.array([1.0, 2.0, 3.0], dtype=float))
 
     names = [comp.name for comp in comps]
-    assert names == ["bal_nv", "bal_siiv", "bal_civ", "bal_ciii", "bal_fe1", "bal_fe2", "bal_mgii"]
-    depth_cfg = comps[2].parameter_priors["depth"]
-    assert depth_cfg["dist"] == "HalfNormal"
-    assert np.isclose(depth_cfg["scale"], 8.0 * 0.05 * 2.0)
-    center_cfg = comps[2].parameter_priors["center"]
-    assert center_cfg["dist"] == "TruncatedNormal"
-    assert center_cfg["loc"] == 1500.0
-    assert center_cfg["low"] == 1400.0
-    assert center_cfg["high"] == 1549.0
+    assert names == ["bal_nv", "bal_siiv", "bal_civ"]
+    assert comps[2].metadata["component_type"] == "bal_absorption"
+    assert comps[2].metadata["line_lambda"] == 1549.06
+    assert comps[2].metadata["shared_parameter_sites"]["v_out"] == "custom_bal_v_out"
+    assert comps[2].metadata["shared_parameter_sites"]["tau_peak"] == "custom_bal_tau_peak"
+    assert comps[2].metadata["shared_parameter_sites"]["covering"] == "custom_bal_covering"
+    assert np.isclose(comps[0].parameter_priors["tau_peak"]["scale"], 0.8)
+    assert np.isclose(comps[1].parameter_priors["tau_peak"]["scale"], 0.8)
+    tau_cfg = comps[2].parameter_priors["tau_peak"]
+    assert tau_cfg["dist"] == "HalfNormal"
+    assert np.isclose(tau_cfg["scale"], 0.8)
+    covering_cfg = comps[2].parameter_priors["covering"]
+    assert covering_cfg["dist"] == "TruncatedNormal"
+    assert covering_cfg["loc"] == 0.55
+    assert covering_cfg["scale"] == 0.2
+    assert covering_cfg["low"] == 0.0
+    assert covering_cfg["high"] == 0.90
+    v_out_cfg = comps[2].parameter_priors["v_out"]
+    assert v_out_cfg["dist"] == "TruncatedNormal"
+    assert v_out_cfg["loc"] == 6000.0
+    assert v_out_cfg["scale"] == 2500.0
+    assert v_out_cfg["low"] == 3000.0
+    assert v_out_cfg["high"] == 12000.0
     shape_cfg = comps[2].parameter_priors["shape_power"]
     assert shape_cfg["dist"] == "TruncatedNormal"
     assert shape_cfg["loc"] == 2.0
@@ -169,12 +186,12 @@ def test_default_line_table_contains_expanded_uv_complexes():
         "OIII1663",
         "HeII1640_br",
         "OIII1663_br",
-        "SiIV_OIV1",
-        "SiIV_OIV2",
+        "SiIV_OIV1_br",
+        "SiIV_OIV2_br",
         "CII1335",
         "OI1304",
         "Lya_br",
-        "NV1240",
+        "NV1240_br",
     }
     assert expected_names.issubset(by_name)
     assert "CIII_br" in by_name

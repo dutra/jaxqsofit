@@ -53,6 +53,22 @@ def _callable_from_ref(ref: str) -> Callable[..., Any]:
     return obj
 
 
+def custom_component_param_site(comp: Any, param_name: str) -> str:
+    """Return the sample-site name for a custom component parameter.
+
+    Components can opt into shared parameters by setting metadata like::
+
+        {"shared_parameter_sites": {"v_out": "custom_bal_v_out"}}
+
+    This leaves the public component name and output model unchanged while
+    allowing related custom components to share a single sampled parameter.
+    """
+    shared = getattr(comp, "metadata", {}).get("shared_parameter_sites", {})
+    if isinstance(shared, Mapping) and str(param_name) in shared:
+        return str(shared[str(param_name)])
+    return comp.site_name(param_name)
+
+
 @dataclass(frozen=True)
 class CustomComponentSpec:
     """Generic additive continuum component.
@@ -352,7 +368,7 @@ def inject_default_custom_component_priors(
                 out_cfg["scale"] = 0.2 * fscale
             elif str(param_name).startswith("c") and scale == 0.0:
                 out_cfg["scale"] = 0.05 * fscale
-            cfg.setdefault(comp.site_name(param_name), out_cfg)
+            cfg.setdefault(custom_component_param_site(comp, param_name), out_cfg)
     return cfg
 
 
