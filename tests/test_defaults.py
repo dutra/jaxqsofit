@@ -142,6 +142,8 @@ def test_build_default_bal_components_exposes_common_bal_lines():
     assert comps[2].metadata["component_type"] == "bal_absorption"
     assert comps[2].metadata["line_lambda"] == 1549.06
     assert comps[2].metadata["shared_parameter_sites"]["v_out"] == "custom_bal_v_out"
+    assert comps[2].metadata["line_cancellation_threshold"] == 0.2
+    assert comps[2].metadata["line_cancellation_scale"] == 0.1
     assert np.isclose(comps[0].parameter_priors["tau_peak"]["scale"], 0.8)
     assert np.isclose(comps[1].parameter_priors["tau_peak"]["scale"], 0.8)
     tau_cfg = comps[2].parameter_priors["tau_peak"]

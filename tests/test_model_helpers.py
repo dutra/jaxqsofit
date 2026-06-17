@@ -15,6 +15,7 @@ from jaxqsofit.model import (
     _host_redshift_prior_params,
     _smc_like_reddening_jax,
     _extract_line_table_from_prior_config,
+    _apply_bal_line_cancellation_penalty,
     _luminosity_distance_cm_jax,
     _shift_and_broaden_single_spectrum_lnlam,
     build_host_template_grid,
@@ -958,6 +959,39 @@ def test_qso_fsps_joint_model_custom_component_returns_jax_array():
     value = tr["custom_const_term_model"]["value"]
     assert isinstance(value, jax.Array)
     assert np.all(np.isfinite(np.asarray(value)))
+
+
+def test_bal_line_cancellation_penalty_uses_total_line_model():
+    wave = np.linspace(1500.0, 1600.0, 64)
+    line_model = np.exp(-0.5 * ((wave - 1550.0) / 8.0) ** 2)
+    component_transmission = 1.0 - 0.5 * np.exp(-0.5 * ((wave - 1550.0) / 10.0) ** 2)
+    comp = make_custom_component(
+        name="bal_test",
+        parameter_priors={},
+        evaluate=model_mod.gaussian_bal_optical_depth_component,
+        metadata={
+            "component_type": "bal_absorption",
+            "line_lambda": 1550.0,
+            "line_cancellation_threshold": 0.0,
+            "line_cancellation_scale": 0.1,
+        },
+    )
+
+    def _model():
+        _apply_bal_line_cancellation_penalty(
+            comp,
+            jnp.asarray(wave),
+            jnp.asarray(line_model),
+            jnp.asarray(component_transmission),
+        )
+
+    tr = trace(seed(_model, jax.random.PRNGKey(0))).get_trace()
+
+    assert "bal_test_line_absorbed_flux" in tr
+    assert "bal_test_line_absorbed_fraction" in tr
+    assert "bal_test_line_cancellation_penalty" in tr
+    assert tr["bal_test_line_absorbed_flux"]["value"] > 0.0
+    assert tr["bal_test_line_absorbed_fraction"]["value"] > 0.0
 
 
 def test_host_redshift_prior_params_shift_negative_at_high_z():
