@@ -359,6 +359,7 @@ class JAXQSOFit:
             'gal_model',
             'line_model_broad',
             'line_model_narrow',
+            'line_component_profiles',
             'line_model',
             'continuum_model',
             'model',
@@ -373,6 +374,7 @@ class JAXQSOFit:
             'gal_model_psf',
             'line_model_broad_psf',
             'line_model_narrow_psf',
+            'line_component_profiles_psf',
             'line_model_psf',
             'psf_model',
         ]
@@ -1586,7 +1588,22 @@ class JAXQSOFit:
         )
         self.tied_line_meta = tied_line_meta
 
-        init_vals = {'gal_v_kms': 0.0, 'gal_sigma_kms': 150.0} if init_values is None else init_values
+        if init_values is None:
+            init_vals = {
+                'gal_v_kms': 0.0,
+                'log_gal_sigma_kms': np.log(150.0),
+            }
+            host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
+            if decompose_host and not (
+                host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}
+                and getattr(fsps_grid, "host_basis_jax", None) is not None
+            ):
+                init_vals['cont_norm'] = np.exp(prior_config.get('log_cont_norm', {}).get('loc', np.log(max(np.nanmedian(np.abs(flux)), 1e-8))))
+                init_vals['log_frac_host'] = prior_config.get('log_frac_host', {}).get('loc', 0.0)
+            if fit_reddening:
+                init_vals['log_reddening_a2500'] = prior_config.get('log_reddening_a2500', {}).get('loc', np.log(0.1))
+        else:
+            init_vals = init_values
         init_strategy = init_to_value(values=init_vals)
         kernel = NUTS(qso_fsps_joint_model, init_strategy=init_strategy, target_accept_prob=target_accept_prob, dense_mass=True, max_tree_depth=8)
         mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=True, jit_model_args=False)
@@ -1941,27 +1958,32 @@ class JAXQSOFit:
 
         def _stage1_init_values():
             """Build data-scale-aware constrained initial values for stage 1."""
-            cont_log_loc = _prior_field('log_cont_norm', 'loc', np.log(max(np.nanmedian(np.abs(flux)), 1e-8)))
-            cont_init = float(np.exp(cont_log_loc))
             pl_init = _prior_field('PL_norm', 'scale', max(0.5 * np.nanmedian(np.abs(flux)), 1e-8))
-            log_frac_host_init = _prior_field('log_frac_host', 'loc', 0.0)
+            host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
+            use_direct_host_amp = not (
+                decompose_host
+                and host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}
+                and getattr(fsps_grid, "host_basis_jax", None) is not None
+            )
 
             values = {
                 'gal_v_kms': 0.0,
-                'gal_sigma_kms': 150.0,
-                'cont_norm': max(cont_init, 1e-8),
-                'log_frac_host': log_frac_host_init,
+                'log_gal_sigma_kms': _prior_field('log_gal_sigma_kms', 'loc', np.log(150.0)),
             }
+            if decompose_host and use_direct_host_amp:
+                values['cont_norm'] = max(np.exp(_prior_field('log_cont_norm', 'loc', np.log(max(np.nanmedian(np.abs(flux)), 1e-8)))), 1e-8)
+                values['log_frac_host'] = _prior_field('log_frac_host', 'loc', 0.0)
             if fit_pl:
                 values['PL_norm'] = max(pl_init, 1e-8)
+                if fit_reddening:
+                    values['log_reddening_a2500'] = _prior_field('log_reddening_a2500', 'loc', np.log(0.1))
 
-            host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
             if decompose_host and host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
                 values['log_stellar_mass'] = _prior_field('log_stellar_mass', 'loc', 9.0)
                 values['log_sfh_age_gyr'] = _prior_field('log_sfh_age_gyr', 'loc', np.log(3.0))
-                values['log_sfh_tau_gyr'] = _prior_field('log_sfh_tau_gyr', 'loc', np.log(1.0))
+                values['log_sfh_tau_over_age'] = _prior_field('log_sfh_tau_over_age', 'loc', 0.0)
                 values['gal_lgmet'] = _prior_field('gal_lgmet', 'loc', 0.0)
-                values['gal_lgmet_scatter'] = max(_prior_field('gal_lgmet_scatter', 'scale', 0.2), 1e-8)
+                values['log_gal_lgmet_scatter'] = _prior_field('log_gal_lgmet_scatter', 'loc', np.log(0.15))
                 values['log_host_aperture_scale'] = _prior_field('log_host_aperture_scale', 'value', 0.0)
             return values
 
@@ -2272,6 +2294,7 @@ class JAXQSOFit:
         self.host = np.median(np.asarray(pred_out['gal_model']), axis=0)
         self.line_broad = np.median(np.asarray(pred_out['line_model_broad']), axis=0) if 'line_model_broad' in pred_out else np.full_like(self.qso, np.nan)
         self.line_narrow = np.median(np.asarray(pred_out['line_model_narrow']), axis=0) if 'line_model_narrow' in pred_out else np.full_like(self.qso, np.nan)
+        self.line_component_profiles = np.median(np.asarray(pred_out['line_component_profiles']), axis=0) if 'line_component_profiles' in pred_out else np.empty((0, len(self.wave)), dtype=float)
         self.f_line_model = np.median(np.asarray(pred_out['line_model']), axis=0)
         self.f_conti_model = np.median(np.asarray(pred_out['continuum_model']), axis=0)
         self.model_total = np.median(np.asarray(pred_out['model']), axis=0)
@@ -2279,6 +2302,7 @@ class JAXQSOFit:
         self.host_psf = np.median(np.asarray(pred_out['gal_model_psf']), axis=0) if 'gal_model_psf' in pred_out else np.full_like(self.model_total, np.nan)
         self.line_broad_psf = np.median(np.asarray(pred_out['line_model_broad_psf']), axis=0) if 'line_model_broad_psf' in pred_out else np.full_like(self.model_total, np.nan)
         self.line_narrow_psf = np.median(np.asarray(pred_out['line_model_narrow_psf']), axis=0) if 'line_model_narrow_psf' in pred_out else np.full_like(self.model_total, np.nan)
+        self.line_component_profiles_psf = np.median(np.asarray(pred_out['line_component_profiles_psf']), axis=0) if 'line_component_profiles_psf' in pred_out else np.empty((0, len(self.wave)), dtype=float)
         self.line_psf = np.median(np.asarray(pred_out['line_model_psf']), axis=0) if 'line_model_psf' in pred_out else np.full_like(self.model_total, np.nan)
         self.psf_model = np.median(np.asarray(pred_out['psf_model']), axis=0) if 'psf_model' in pred_out else np.full_like(self.model_total, np.nan)
         self.fsps_weights_median = np.median(np.asarray(pred_out['fsps_weights']), axis=0)
@@ -2311,30 +2335,20 @@ class JAXQSOFit:
         self.eta_psf = float(np.nanmedian(eta_psf_draws)) if eta_psf_draws.size > 0 else np.nan
         self.eta_psf_err = float(np.nanstd(eta_psf_draws)) if eta_psf_draws.size > 0 else np.nan
         self.scale_psf = 10.0 ** (-0.4 * self.delta_m_psf) if np.isfinite(self.delta_m_psf) else np.nan
-        if 'host_redshift_prior_weight' in pred_out:
-            host_prior_weight_draws = np.asarray(pred_out['host_redshift_prior_weight'], dtype=float)
-        else:
-            host_prior_weight_draws = np.array([np.nan], dtype=float)
-        if 'host_redshift_prior_loc_eff' in pred_out:
-            host_prior_loc_draws = np.asarray(pred_out['host_redshift_prior_loc_eff'], dtype=float)
-        else:
-            host_prior_loc_draws = np.array([np.nan], dtype=float)
-        if 'host_redshift_prior_scale_eff' in pred_out:
-            host_prior_scale_draws = np.asarray(pred_out['host_redshift_prior_scale_eff'], dtype=float)
-        else:
-            host_prior_scale_draws = np.array([np.nan], dtype=float)
-        if 'host_redshift_prior_df_eff' in pred_out:
-            host_prior_df_draws = np.asarray(pred_out['host_redshift_prior_df_eff'], dtype=float)
-        else:
-            host_prior_df_draws = np.array([np.nan], dtype=float)
-        self.host_redshift_prior_weight = float(np.nanmedian(host_prior_weight_draws)) if host_prior_weight_draws.size > 0 else np.nan
-        self.host_redshift_prior_weight_err = float(np.nanstd(host_prior_weight_draws)) if host_prior_weight_draws.size > 0 else np.nan
-        self.host_redshift_prior_loc_eff = float(np.nanmedian(host_prior_loc_draws)) if host_prior_loc_draws.size > 0 else np.nan
-        self.host_redshift_prior_loc_eff_err = float(np.nanstd(host_prior_loc_draws)) if host_prior_loc_draws.size > 0 else np.nan
-        self.host_redshift_prior_scale_eff = float(np.nanmedian(host_prior_scale_draws)) if host_prior_scale_draws.size > 0 else np.nan
-        self.host_redshift_prior_scale_eff_err = float(np.nanstd(host_prior_scale_draws)) if host_prior_scale_draws.size > 0 else np.nan
-        self.host_redshift_prior_df_eff = float(np.nanmedian(host_prior_df_draws)) if host_prior_df_draws.size > 0 else np.nan
-        self.host_redshift_prior_df_eff_err = float(np.nanstd(host_prior_df_draws)) if host_prior_df_draws.size > 0 else np.nan
+        def _optional_draw_summary(key):
+            """Return median/std for an optional predictive diagnostic."""
+            if key not in pred_out:
+                return np.nan, np.nan
+            draws = np.asarray(pred_out[key], dtype=float)
+            finite = np.isfinite(draws)
+            if draws.size == 0 or not np.any(finite):
+                return np.nan, np.nan
+            return float(np.nanmedian(draws)), float(np.nanstd(draws))
+
+        self.host_redshift_prior_weight, self.host_redshift_prior_weight_err = _optional_draw_summary('host_redshift_prior_weight')
+        self.host_redshift_prior_loc_eff, self.host_redshift_prior_loc_eff_err = _optional_draw_summary('host_redshift_prior_loc_eff')
+        self.host_redshift_prior_scale_eff, self.host_redshift_prior_scale_eff_err = _optional_draw_summary('host_redshift_prior_scale_eff')
+        self.host_redshift_prior_df_eff, self.host_redshift_prior_df_eff_err = _optional_draw_summary('host_redshift_prior_df_eff')
 
         def _band(x):
             """Compute 16th/84th percentile uncertainty band across samples."""
@@ -2359,6 +2373,19 @@ class JAXQSOFit:
             self.pred_bands[name] = _band(draws)
         for name, draws in self._pred_custom_line_draws.items():
             self.pred_bands[name] = _band(draws)
+        self.pred_bands_psf = {}
+        if 'psf_model' in pred_out:
+            self.pred_bands_psf['total_model'] = _band(pred_out['psf_model'])
+        if 'gal_model_psf' in pred_out:
+            self.pred_bands_psf['host'] = _band(pred_out['gal_model_psf'])
+        if 'agn_model_psf' in pred_out:
+            self.pred_bands_psf['PL'] = _band(pred_out['agn_model_psf'])
+        if 'line_model_psf' in pred_out:
+            self.pred_bands_psf['lines'] = _band(pred_out['line_model_psf'])
+        if 'line_model_broad_psf' in pred_out:
+            self.pred_bands_psf['line_broad'] = _band(pred_out['line_model_broad_psf'])
+        if 'line_model_narrow_psf' in pred_out:
+            self.pred_bands_psf['line_narrow'] = _band(pred_out['line_model_narrow_psf'])
         if bool(getattr(self, '_fit_fit_bal', False)):
             bi, bi_err = self.balnicity_index()
             self.bi = float(bi)
@@ -3107,13 +3134,20 @@ class JAXQSOFit:
         return prof
 
     def line_profile_from_components(self, line_key: str) -> np.ndarray:
-        """Build a line-only profile from posterior-median Gaussian components.
+        """Build a line-only profile from posterior-median component profiles.
 
         Parameters
         ----------
         line_key : str
             Line-name prefix (for example ``'Hb_br'``).
         """
+        profiles = np.asarray(getattr(self, 'line_component_profiles', []), dtype=float)
+        names = np.asarray(getattr(self, 'tied_line_meta', {}).get('names', []))
+        if profiles.ndim == 2 and profiles.shape[1] == len(self.wave) and names.size == profiles.shape[0]:
+            keep = np.array([str(n).startswith(f'{line_key}_') for n in names], dtype=bool)
+            if np.any(keep):
+                return np.sum(profiles[keep], axis=0)
+            return np.zeros_like(self.wave, dtype=float)
         if not hasattr(self, 'line_component_amp_median'):
             return np.zeros_like(self.wave, dtype=float)
         return self._line_profile_from_params(
@@ -3136,6 +3170,17 @@ class JAXQSOFit:
         self._ensure_hydrated_from_samples()
         if not hasattr(self, 'pred_out') or self.pred_out is None:
             return np.zeros_like(self.wave, dtype=float)
+        names = np.asarray(getattr(self, 'tied_line_meta', {}).get('names', []))
+        if 'line_component_profiles' in self.pred_out:
+            profile_draws = np.asarray(self.pred_out['line_component_profiles'], dtype=float)
+            if profile_draws.ndim == 3 and names.size == profile_draws.shape[1]:
+                idx = int(draw_index)
+                if idx < 0 or idx >= profile_draws.shape[0]:
+                    raise IndexError(f'draw_index {idx} is out of bounds for {profile_draws.shape[0]} posterior draws')
+                keep = np.array([str(n).startswith(f'{line_key}_') for n in names], dtype=bool)
+                if np.any(keep):
+                    return np.sum(profile_draws[idx, keep], axis=0)
+                return np.zeros_like(self.wave, dtype=float)
         if 'line_amp_per_component' not in self.pred_out:
             return np.zeros_like(self.wave, dtype=float)
 

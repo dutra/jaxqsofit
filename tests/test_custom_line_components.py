@@ -52,6 +52,7 @@ def test_custom_line_components_add_to_broad_and_narrow_models():
 
     prior_config = {
         "log_cont_norm": {"dist": "LogNormal", "loc": 0.0, "scale": 0.1},
+        "log_frac_host": {"dist": "StudentT", "loc": 0.0, "scale": 2.0, "df": 3.0},
         "PL_slope": {"dist": "Normal", "loc": 0.0, "scale": 0.1},
         "frac_jitter": {"dist": "HalfNormal", "scale": 0.1},
         "add_jitter": {"dist": "HalfNormal", "scale": 0.1},

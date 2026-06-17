@@ -9,6 +9,7 @@ from jaxqsofit import (
     make_template_component,
 )
 from jaxqsofit.custom_components import (
+    custom_component_param_site,
     custom_component_site_names,
     inject_default_custom_component_priors,
 )
@@ -46,6 +47,25 @@ def test_custom_component_prior_injection_and_site_names():
         "custom_alt_feii_model",
         "custom_blue_tilt_model",
     ]
+
+
+def test_custom_component_shared_parameter_site_injection():
+    comp = make_custom_component(
+        name="Shared BAL",
+        parameter_priors={
+            "v_out": {"dist": "TruncatedNormal", "loc": 6000.0, "scale": 2500.0, "low": 3000.0, "high": 12000.0},
+            "tau_peak": {"dist": "HalfNormal", "scale": 1.0},
+        },
+        evaluate=lambda wave, params, metadata: np.zeros_like(np.asarray(wave)) + params["tau_peak"] * 0.0,
+        metadata={"shared_parameter_sites": {"v_out": "custom_bal_v_out"}},
+    )
+
+    cfg = inject_default_custom_component_priors({}, np.array([1.0, 2.0, 3.0]), [comp])
+
+    assert custom_component_param_site(comp, "v_out") == "custom_bal_v_out"
+    assert "custom_bal_v_out" in cfg
+    assert "custom_shared_bal_v_out" not in cfg
+    assert "custom_shared_bal_tau_peak" in cfg
 
 
 def test_reconstruct_posterior_components_includes_custom_draws(monkeypatch):
@@ -247,6 +267,198 @@ def test_plot_fig_includes_custom_component_trace():
     plt.close(fig)
 
 
+def test_plot_fig_tolerates_missing_prediction_bands():
+    lam, flux, err = _make_simple_spectrum()
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
+    q.wave = lam
+    q.wave_prereduced = lam
+    q.flux = flux
+    q.flux_prereduced = flux
+    q.err = err
+    q.model_total = np.full_like(lam, 1.2)
+    q.host = np.zeros_like(lam)
+    q.f_pl_model = np.zeros_like(lam)
+    q.f_pl_model_intrinsic = np.zeros_like(lam)
+    q.f_fe_mgii_model = np.zeros_like(lam)
+    q.f_fe_balmer_model = np.zeros_like(lam)
+    q.f_bc_model = np.zeros_like(lam)
+    q.f_line_model = np.zeros_like(lam)
+    q.custom_components = {}
+    q.pred_bands = None
+    q.scale_psf = 1.0
+    q.save_fig = False
+    q.custom_line_components = {}
+    q.line_component_amp_median = np.array([])
+    q.line_component_mu_median = np.array([])
+    q.line_component_sig_median = np.array([])
+    q.tied_line_meta = {}
+    q.psf_model = np.full_like(lam, np.nan)
+    q.qso_psf = np.full_like(lam, np.nan)
+    q.host_psf = np.full_like(lam, np.nan)
+    q.line_psf = np.full_like(lam, np.nan)
+
+    q.plot_fig(show_plot=False, plot_legend=False, plot_1sigma=True)
+
+    assert q.fig is not None
+    plt.close(q.fig)
+
+
+def test_plot_fig_scales_broad_component_overlay_to_fitted_broad_model():
+    lam, flux, err = _make_simple_spectrum()
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
+    q.wave = lam
+    q.wave_prereduced = lam
+    q.flux = flux
+    q.flux_prereduced = flux
+    q.err = err
+    lnwave = np.log(lam)
+    raw_broad = 5.0 * np.exp(-0.5 * ((lnwave - np.log(3000.0)) / 0.08) ** 2)
+    q.line_broad = 0.25 * raw_broad
+    q.line_narrow = np.zeros_like(lam)
+    q.model_total = q.line_broad
+    q.host = np.zeros_like(lam)
+    q.f_pl_model = np.zeros_like(lam)
+    q.f_pl_model_intrinsic = np.zeros_like(lam)
+    q.f_fe_mgii_model = np.zeros_like(lam)
+    q.f_fe_balmer_model = np.zeros_like(lam)
+    q.f_bc_model = np.zeros_like(lam)
+    q.f_line_model = q.line_broad
+    q.custom_components = {}
+    q.pred_bands = None
+    q.scale_psf = 1.0
+    q.save_fig = False
+    q.custom_line_components = {}
+    q.line_component_amp_median = np.array([5.0])
+    q.line_component_mu_median = np.array([np.log(3000.0)])
+    q.line_component_sig_median = np.array([0.08])
+    q.line_component_profiles = q.line_broad[None, :]
+    q.line_component_profiles_psf = np.full((0, len(lam)), np.nan)
+    q.tied_line_meta = {"names": ["CIV_br"]}
+    q.psf_model = np.full_like(lam, np.nan)
+    q.qso_psf = np.full_like(lam, np.nan)
+    q.host_psf = np.full_like(lam, np.nan)
+    q.line_psf = np.full_like(lam, np.nan)
+
+    q.plot_fig(show_plot=False, plot_legend=True, plot_1sigma=True)
+
+    fig = plt.gcf()
+    ax = fig.axes[0]
+    broad_lines = [line for line in ax.get_lines() if line.get_label() == "broad components"]
+    assert len(broad_lines) == 1
+    np.testing.assert_allclose(broad_lines[0].get_ydata(), q.line_broad, rtol=1e-12, atol=1e-12)
+    plt.close(fig)
+
+
+def test_plot_fig_includes_custom_line_component_trace():
+    lam, flux, err = _make_simple_spectrum()
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
+    q.wave = lam
+    q.wave_prereduced = lam
+    q.flux = flux
+    q.flux_prereduced = flux
+    q.err = err
+    q.model_total = np.full_like(lam, 1.2)
+    q.host = np.zeros_like(lam)
+    q.f_pl_model = np.zeros_like(lam)
+    q.f_pl_model_intrinsic = np.zeros_like(lam)
+    q.f_fe_mgii_model = np.zeros_like(lam)
+    q.f_fe_balmer_model = np.zeros_like(lam)
+    q.f_bc_model = np.zeros_like(lam)
+    q.f_line_model = np.full_like(lam, 0.4)
+    q.line_broad = np.full_like(lam, 0.4)
+    q.line_narrow = np.zeros_like(lam)
+    q.custom_components = {}
+    q.custom_line_components = {"custom_civ_wing": np.full_like(lam, 0.4)}
+    q.pred_bands = {"custom_civ_wing": (np.full_like(lam, 0.3), np.full_like(lam, 0.5))}
+    q.scale_psf = 1.0
+    q.save_fig = False
+    q.line_component_amp_median = np.array([])
+    q.line_component_mu_median = np.array([])
+    q.line_component_sig_median = np.array([])
+    q.line_component_profiles = np.empty((0, len(lam)))
+    q.line_component_profiles_psf = np.empty((0, len(lam)))
+    q.tied_line_meta = {}
+    q.psf_model = np.full_like(lam, np.nan)
+    q.qso_psf = np.full_like(lam, np.nan)
+    q.host_psf = np.full_like(lam, np.nan)
+    q.line_psf = np.full_like(lam, np.nan)
+
+    q.plot_fig(show_plot=False, plot_legend=True, plot_1sigma=True)
+
+    fig = plt.gcf()
+    ax = fig.axes[0]
+    labels = [line.get_label() for line in ax.get_lines()]
+    assert "custom civ wing" in labels
+    plt.close(fig)
+
+
+def test_plot_fig_draws_prediction_bands_in_psf_space():
+    lam, flux, err = _make_simple_spectrum()
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
+    q.wave = lam
+    q.wave_prereduced = lam
+    q.flux = flux
+    q.flux_prereduced = flux
+    q.err = err
+    q.model_total = np.full_like(lam, 1.0)
+    q.psf_model = np.full_like(lam, 2.0)
+    q.host = np.zeros_like(lam)
+    q.host_psf = np.zeros_like(lam)
+    q.f_pl_model = np.zeros_like(lam)
+    q.f_pl_model_intrinsic = np.zeros_like(lam)
+    q.qso_psf = np.zeros_like(lam)
+    q.f_fe_mgii_model = np.zeros_like(lam)
+    q.f_fe_balmer_model = np.zeros_like(lam)
+    q.f_bc_model = np.zeros_like(lam)
+    q.f_line_model = np.zeros_like(lam)
+    q.line_psf = np.zeros_like(lam)
+    q.custom_components = {}
+    q.custom_line_components = {}
+    q.pred_bands = {"total_model": (np.full_like(lam, 0.8), np.full_like(lam, 1.2))}
+    q.pred_bands_psf = {"total_model": (np.full_like(lam, 1.7), np.full_like(lam, 2.3))}
+    q.scale_psf = 1.0
+    q.save_fig = False
+    q.line_component_amp_median = np.array([])
+    q.line_component_mu_median = np.array([])
+    q.line_component_sig_median = np.array([])
+    q.line_component_profiles = np.empty((0, len(lam)))
+    q.line_component_profiles_psf = np.empty((0, len(lam)))
+    q.tied_line_meta = {}
+    q.qso_psf = np.zeros_like(lam)
+    q.line_broad_psf = np.zeros_like(lam)
+    q.line_narrow_psf = np.zeros_like(lam)
+
+    q.plot_fig(show_plot=False, plot_legend=False, plot_1sigma=True, plot_psf_space=True)
+
+    fig = plt.gcf()
+    ax = fig.axes[0]
+    assert len(ax.collections) >= 1
+    ymin = np.nanmin(ax.collections[0].get_paths()[0].vertices[:, 1])
+    ymax = np.nanmax(ax.collections[0].get_paths()[0].vertices[:, 1])
+    assert np.isclose(ymin, 1.7)
+    assert np.isclose(ymax, 2.3)
+    plt.close(fig)
+
+
+def test_line_profile_from_components_uses_posterior_median_profiles():
+    lam, flux, err = _make_simple_spectrum()
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
+    q.wave = lam
+    q.tied_line_meta = {"names": ["CIV_br", "CIV_na", "MgII_br"]}
+    q.line_component_profiles = np.vstack([
+        np.full_like(lam, 1.0),
+        np.full_like(lam, 2.0),
+        np.full_like(lam, 5.0),
+    ])
+    q.line_component_amp_median = np.array([100.0, 100.0, 100.0])
+    q.line_component_mu_median = np.array([np.log(3000.0)] * 3)
+    q.line_component_sig_median = np.array([0.1, 0.1, 0.1])
+
+    profile = q.line_profile_from_components("CIV")
+
+    np.testing.assert_allclose(profile, np.full_like(lam, 3.0))
+
+
 def test_plot_fig_negative_custom_component_sets_negative_ylim():
     lam, flux, err = _make_simple_spectrum()
     q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
@@ -292,4 +504,54 @@ def test_plot_fig_negative_custom_component_sets_negative_ylim():
     labels = [line.get_label() for line in ax.get_lines()]
     assert "BAL" in labels
     assert ax.get_ylim()[0] < -0.7
+    plt.close(fig)
+
+
+def test_plot_fig_draws_bal_components_individually_with_single_legend_label():
+    lam, flux, err = _make_simple_spectrum()
+    q = JAXQSOFit.from_arrays(lam=lam, flux=flux, err=err, z=0.1)
+    q.wave = lam
+    q.wave_prereduced = lam
+    q.flux = flux
+    q.flux_prereduced = flux
+    q.err = err
+    q.model_total = np.full_like(lam, 1.1)
+    q.host = np.zeros_like(lam)
+    q.f_pl_model = np.zeros_like(lam)
+    q.f_pl_model_intrinsic = np.zeros_like(lam)
+    q.f_fe_mgii_model = np.zeros_like(lam)
+    q.f_fe_balmer_model = np.zeros_like(lam)
+    q.f_bc_model = np.zeros_like(lam)
+    q.f_line_model = np.zeros_like(lam)
+    bal_civ = -0.8 * np.exp(-0.5 * ((lam - 2600.0) / 100.0) ** 2)
+    bal_siiv = -0.5 * np.exp(-0.5 * ((lam - 3200.0) / 120.0) ** 2)
+    q.custom_components = {"bal_civ": bal_civ, "bal_siiv": bal_siiv}
+    q.pred_bands = None
+    q.scale_psf = 1.0
+    q.save_fig = False
+    q.custom_line_components = {}
+    q.line_component_amp_median = np.array([])
+    q.line_component_mu_median = np.array([])
+    q.line_component_sig_median = np.array([])
+    q.line_component_profiles = np.empty((0, len(lam)))
+    q.line_component_profiles_psf = np.empty((0, len(lam)))
+    q.tied_line_meta = {}
+    q.psf_model = np.full_like(lam, np.nan)
+    q.qso_psf = np.full_like(lam, np.nan)
+    q.host_psf = np.full_like(lam, np.nan)
+    q.line_psf = np.full_like(lam, np.nan)
+
+    q.plot_fig(show_plot=False, plot_legend=True, plot_1sigma=True)
+
+    fig = plt.gcf()
+    ax = fig.axes[0]
+    bal_lines = [
+        line for line in ax.get_lines()
+        if line.get_color() == "red" and np.nanmin(line.get_ydata()) < -0.1
+    ]
+    labels = [line.get_label() for line in bal_lines]
+    assert len(bal_lines) == 2
+    assert labels.count("BAL") == 1
+    np.testing.assert_allclose(bal_lines[0].get_ydata(), bal_civ)
+    np.testing.assert_allclose(bal_lines[1].get_ydata(), bal_siiv)
     plt.close(fig)

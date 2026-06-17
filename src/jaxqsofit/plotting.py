@@ -52,11 +52,11 @@ def posterior_series(fitter, param_names=None, max_vector_elems=2):
         param_names = sorted(samples.keys())
     elif param_names is None:
         param_names = [
-            'cont_norm', 'log_frac_host', 'PL_norm', 'PL_slope',
+            'cont_norm', 'host_amp', 'log_frac_host', 'PL_norm', 'PL_slope',
             'Fe_uv_norm', 'log_Fe_op_over_uv',
             'Fe_uv_FWHM', 'Fe_op_FWHM',
             'Balmer_norm', 'Balmer_Tau', 'Balmer_vel',
-            'gal_v_kms', 'gal_sigma_kms',
+            'gal_v_kms', 'log_gal_sigma_kms', 'gal_sigma_kms',
             'frac_jitter', 'add_jitter',
         ]
 
@@ -513,6 +513,17 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
         'deeppink',
     ]
     custom_components = list(getattr(fitter, 'custom_components', {}).items())
+    custom_line_components = list(getattr(fitter, 'custom_line_components', {}).items())
+
+    def _is_bal_component_name(name):
+        """Return True for fitted BAL custom components."""
+        return str(name).startswith('bal_')
+
+    def _custom_component_color(name, idx):
+        """Return the plotting color for one custom component."""
+        if _is_bal_component_name(name):
+            return 'red'
+        return custom_component_colors[idx % len(custom_component_colors)]
 
     def _show_component(arr):
         """Return True when a component has finite amplitude worth plotting."""
@@ -534,7 +545,8 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                 vals.append(arr)
         return vals
 
-    if plot_1sigma and hasattr(fitter, 'pred_bands') and not use_psf_space:
+    pred_bands = getattr(fitter, "pred_bands_psf" if use_psf_space else "pred_bands", None) or {}
+    if plot_1sigma and pred_bands:
         band_colors = {
             'total_model': 'b',
             'host': 'purple',
@@ -544,9 +556,9 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             'lines': 'lightskyblue',
         }
         for key, color in band_colors.items():
-            if key not in fitter.pred_bands:
+            if key not in pred_bands:
                 continue
-            lo, hi = fitter.pred_bands[key]
+            lo, hi = pred_bands[key]
             if len(lo) == len(fitter.wave) and _show_component(0.5 * (np.asarray(lo) + np.asarray(hi))):
                 ax.fill_between(
                     fitter.wave,
@@ -558,25 +570,25 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                     zorder=0,
                     rasterized=True,
                 )
-        for idx, (name, model) in enumerate(custom_components):
-            if name not in fitter.pred_bands:
+        for idx, (name, model) in enumerate(custom_components + custom_line_components):
+            if name not in pred_bands:
                 continue
-            lo, hi = fitter.pred_bands[name]
+            lo, hi = pred_bands[name]
             if len(lo) != len(fitter.wave) or not _show_component(model):
                 continue
             ax.fill_between(
                 fitter.wave,
                 lo,
                 hi,
-                color=custom_component_colors[idx % len(custom_component_colors)],
+                color=_custom_component_color(name, idx),
                 alpha=sigma_alpha,
                 linewidth=0,
                 zorder=0,
                 rasterized=True,
             )
-    if bool(plot_intrinsic_powerlaw) and hasattr(fitter, 'pred_bands') and not use_psf_space:
-        if 'PL_intrinsic' in fitter.pred_bands:
-            lo, hi = fitter.pred_bands['PL_intrinsic']
+    if bool(plot_intrinsic_powerlaw) and pred_bands and not use_psf_space:
+        if 'PL_intrinsic' in pred_bands:
+            lo, hi = pred_bands['PL_intrinsic']
             if len(lo) == len(fitter.wave) and _show_component(0.5 * (np.asarray(lo) + np.asarray(hi))):
                 ax.fill_between(
                     fitter.wave,
@@ -630,10 +642,11 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
         ax.plot(fitter.wave, bc_plot, color='y', lw=1.2, label=bc_label, zorder=5, rasterized=True)
     else:
         ax.plot(fitter.wave, bc_plot, color='y', lw=1.2, zorder=5, rasterized=True)
+    custom_component_zorder = 4.8
     bal_legend_drawn = False
-    for idx, (name, model) in enumerate(custom_components):
-        color = custom_component_colors[idx % len(custom_component_colors)]
-        is_bal_component = str(name).startswith('bal_')
+    for idx, (name, model) in enumerate(custom_components + custom_line_components):
+        color = _custom_component_color(name, idx)
+        is_bal_component = _is_bal_component_name(name)
         if is_bal_component:
             label = 'BAL'
         else:
@@ -642,11 +655,19 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             draw_label = label
             if is_bal_component and bal_legend_drawn:
                 draw_label = None
-            ax.plot(fitter.wave, model, color=color, lw=1.4, label=draw_label, zorder=5, rasterized=True)
+            ax.plot(
+                fitter.wave,
+                model,
+                color=color,
+                lw=1.4,
+                label=draw_label,
+                zorder=custom_component_zorder,
+                rasterized=True,
+            )
             if is_bal_component and draw_label is not None:
                 bal_legend_drawn = True
         else:
-            ax.plot(fitter.wave, model, color=color, lw=1.4, zorder=5, rasterized=True)
+            ax.plot(fitter.wave, model, color=color, lw=1.4, zorder=custom_component_zorder, rasterized=True)
     if len(line_plot) == len(fitter.wave):
         if _show_component(line_plot):
             ax.plot(
@@ -712,58 +733,56 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             label='synthetic photometry',
         )
 
-    # Plot individual Gaussian line components: broad (*_br) in red, narrow in green.
+    # Plot posterior-median individual Gaussian line-component profiles.
     if (hasattr(fitter, 'line_component_amp_median')
             and hasattr(fitter, 'line_component_mu_median')
             and hasattr(fitter, 'line_component_sig_median')
             and hasattr(fitter, 'tied_line_meta')
             and len(fitter.line_component_amp_median) > 0):
-        lnwave = np.log(fitter.wave)
         comp_labels = fitter.tied_line_meta.get('names', [''] * len(fitter.line_component_amp_median))
-        drew_broad_label = False
-        drew_narrow_label = False
-        show_line_leg = _show_component(line_plot)
-        for i in range(len(fitter.line_component_amp_median)):
-            amp = float(fitter.line_component_amp_median[i])
-            mu = float(fitter.line_component_mu_median[i])
-            sig = float(fitter.line_component_sig_median[i])
-            if not np.isfinite(amp) or not np.isfinite(mu) or not np.isfinite(sig) or sig <= 0:
-                continue
-            prof = amp * np.exp(-0.5 * ((lnwave - mu) / sig) ** 2)
-            # Keep component plotting consistent with polynomial correction if enabled.
-            if hasattr(fitter, 'f_poly_model') and len(fitter.f_poly_model) == len(prof):
-                prof = prof * fitter.f_poly_model
-            cname = str(comp_labels[i]).lower()
-            is_broad = cname.endswith('_br') or ('_br' in cname)
-            if use_psf_space:
-                line_scale = psf_scale if is_broad else psf_scale * float(getattr(fitter, 'eta_psf', 1.0))
-                prof = line_scale * prof
-            if is_broad:
-                lbl = 'broad components' if (show_line_leg and not drew_broad_label) else None
-                ax.plot(
-                    fitter.wave,
-                    prof,
-                    color='red',
-                    lw=0.7,
-                    alpha=0.35,
-                    zorder=3,
-                    label=lbl,
-                    rasterized=True,
-                )
-                drew_broad_label = True
-            else:
-                lbl = 'narrow components' if (show_line_leg and not drew_narrow_label) else None
-                ax.plot(
-                    fitter.wave,
-                    prof,
-                    color='green',
-                    lw=0.7,
-                    alpha=0.25,
-                    zorder=3,
-                    label=lbl,
-                    rasterized=True,
-                )
-                drew_narrow_label = True
+        profiles = np.asarray(
+            getattr(
+                fitter,
+                'line_component_profiles_psf' if use_psf_space else 'line_component_profiles',
+                np.empty((0, len(fitter.wave))),
+            ),
+            dtype=float,
+        )
+        if profiles.ndim == 2 and profiles.shape[1] == len(fitter.wave):
+            drew_broad_label = False
+            drew_narrow_label = False
+            show_line_leg = _show_component(line_plot)
+            n_profiles = min(profiles.shape[0], len(comp_labels))
+            for i in range(n_profiles):
+                prof = profiles[i]
+                cname = str(comp_labels[i]).lower()
+                is_broad = cname.endswith('_br') or ('_br' in cname)
+                if is_broad:
+                    lbl = 'broad components' if (show_line_leg and not drew_broad_label) else None
+                    ax.plot(
+                        fitter.wave,
+                        prof,
+                        color='red',
+                        lw=0.7,
+                        alpha=0.35,
+                        zorder=3,
+                        label=lbl,
+                        rasterized=True,
+                    )
+                    drew_broad_label = True
+                else:
+                    lbl = 'narrow components' if (show_line_leg and not drew_narrow_label) else None
+                    ax.plot(
+                        fitter.wave,
+                        prof,
+                        color='green',
+                        lw=0.7,
+                        alpha=0.25,
+                        zorder=3,
+                        label=lbl,
+                        rasterized=True,
+                    )
+                    drew_narrow_label = True
 
     ax.set_xlim(fitter.wave.min(), fitter.wave.max())
     if ylims is None:
@@ -777,6 +796,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             bc_plot,
             line_plot,
             *[model for _, model in custom_components],
+            *[model for _, model in custom_line_components],
         )
         if yvals:
             yplot = np.concatenate(yvals)

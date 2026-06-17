@@ -89,7 +89,7 @@ def test_public_model_names_delegate_to_legacy_implementations(monkeypatch):
     assert calls["bal"][1]["metadata"] == {}
 
 
-def test_reddening_a2500_site_is_unique_when_sampled():
+def test_reddening_a2500_is_sampled_in_log_space_and_exposed():
     wave = np.linspace(2000.0, 3000.0, 8)
     flux = np.ones_like(wave)
     err = np.full_like(wave, 0.1)
@@ -120,7 +120,8 @@ def test_reddening_a2500_site_is_unique_when_sampled():
         fit_reddening=True,
     )
 
-    assert model_trace["reddening_a2500"]["type"] == "sample"
+    assert model_trace["log_reddening_a2500"]["type"] == "sample"
+    assert model_trace["reddening_a2500"]["type"] == "deterministic"
 
 
 def test_fe_template_component_smoothly_bounds_fwhm_below_template_base():
@@ -392,6 +393,43 @@ def test_build_tied_line_meta_from_linelist_minimal():
         assert key in meta
 
 
+def test_build_tied_line_meta_includes_lines_with_broad_wings_overlapping_window():
+    base = {
+        "compname": "edge",
+        "ngauss": 1,
+        "inisca": 1.0,
+        "minsca": 0.0,
+        "maxsca": 1e3,
+        "inisig": 0.001,
+        "minsig": 0.0005,
+        "voff": 0.005,
+        "vindex": 0,
+        "windex": 0,
+        "findex": 0,
+        "fvalue": 1.0,
+    }
+    line_table = [
+        {
+            **base,
+            "lambda": 1450.0,
+            "linename": "broad_edge",
+            "maxsig": 0.02,
+        },
+        {
+            **base,
+            "lambda": 1450.0,
+            "linename": "narrow_edge",
+            "maxsig": 0.001,
+        },
+    ]
+    wave = np.linspace(1500.0, 1700.0, 200)
+
+    meta = build_tied_line_meta_from_linelist(line_table, wave)
+
+    assert meta["names"] == ["broad_edge_1"]
+    assert meta["n_lines"] == 1
+
+
 def test_build_tied_line_meta_uses_voff_as_log_wavelength_offset():
     line_table = [
         {
@@ -421,6 +459,38 @@ def test_build_tied_line_meta_uses_voff_as_log_wavelength_offset():
     assert np.allclose(meta["dmu_max_group"], [0.015])
 
 
+def test_build_tied_line_meta_expands_ngauss_into_independent_groups():
+    line_table = [
+        {
+            "lambda": 1549.06,
+            "linename": "CIV_br",
+            "compname": "CIV",
+            "ngauss": 3,
+            "inisca": 1.0,
+            "minsca": 0.0,
+            "maxsca": 1e3,
+            "inisig": 0.01,
+            "minsig": 0.001,
+            "maxsig": 0.05,
+            "voff": 0.015,
+            "vindex": 0,
+            "windex": 0,
+            "findex": 0,
+            "fvalue": 1.0,
+        }
+    ]
+    wave = np.linspace(1500.0, 1700.0, 200)
+
+    meta = build_tied_line_meta_from_linelist(line_table, wave)
+
+    assert meta["n_lines"] == 3
+    assert meta["n_vgroups"] == 3
+    assert meta["n_wgroups"] == 3
+    assert meta["n_fgroups"] == 3
+    assert len(set(meta["compnames"])) == 3
+    assert np.allclose(meta["flux_ratio"], np.ones(3))
+
+
 def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_luminosities():
     wave = np.linspace(2000.0, 6000.0, 32)
     flux = np.ones_like(wave)
@@ -440,7 +510,7 @@ def test_qso_fsps_joint_model_reports_log_lambda_llambda_requested_continuum_lum
         "tau_host": np.array(1.0),
         "fsps_weights_raw": np.array([0.0]),
         "gal_v_kms": np.array(0.0),
-        "gal_sigma_kms": np.array(100.0),
+        "log_gal_sigma_kms": np.log(100.0),
         "frac_jitter": np.array(0.0),
         "add_jitter": np.array(0.0),
     }
@@ -511,11 +581,11 @@ def test_qso_fsps_joint_model_supports_delayed_sfh_host_with_mzr():
         "PL_slope": np.array(0.0),
         "log_stellar_mass": np.array(10.0),
         "log_sfh_age_gyr": np.log(1.0),
-        "log_sfh_tau_gyr": np.log(0.5),
+        "log_sfh_tau_over_age": np.log(0.5),
         "gal_lgmet": np.array(-0.1),
-        "gal_lgmet_scatter": np.array(0.2),
+        "log_gal_lgmet_scatter": np.log(0.2),
         "gal_v_kms": np.array(0.0),
-        "gal_sigma_kms": np.array(100.0),
+        "log_gal_sigma_kms": np.log(100.0),
         "frac_jitter": np.array(0.0),
         "add_jitter": np.array(0.0),
     }
@@ -544,6 +614,7 @@ def test_qso_fsps_joint_model_supports_delayed_sfh_host_with_mzr():
     assert weights.shape == (4,)
     assert np.isclose(np.sum(weights), 1.0)
     assert np.all(weights >= 0.0)
+    assert "host_amp" in tr
     assert "mass_metallicity_relation_prior" in tr
     assert "mass_metallicity_relation_logprior" in tr
     assert np.isfinite(float(tr["mass_metallicity_relation_logprior"]["value"]))
@@ -587,12 +658,12 @@ def test_delayed_sfh_host_uses_physical_stellar_mass_scaling():
         "PL_norm": np.array(0.0),
         "PL_slope": np.array(0.0),
         "log_sfh_age_gyr": np.log(1.0),
-        "log_sfh_tau_gyr": np.log(0.5),
+        "log_sfh_tau_over_age": np.log(0.5),
         "gal_lgmet": np.array(-0.5),
-        "gal_lgmet_scatter": np.array(0.2),
+        "log_gal_lgmet_scatter": np.log(0.2),
         "log_host_aperture_scale": np.array(0.0),
         "gal_v_kms": np.array(0.0),
-        "gal_sigma_kms": np.array(1.0),
+        "log_gal_sigma_kms": np.log(1.0),
         "frac_jitter": np.array(0.0),
         "add_jitter": np.array(0.0),
     }
@@ -620,6 +691,8 @@ def test_delayed_sfh_host_uses_physical_stellar_mass_scaling():
             fit_reddening=False,
             z_qso=0.1,
         )
+        assert "log_host_amp" not in tr
+        assert "host_amp" in tr
         return np.asarray(tr["gal_model_intrinsic"]["value"], dtype=float)
 
     host_low = _host_for_mass(8.0)
@@ -663,9 +736,9 @@ def test_delayed_sfh_host_accepts_jitted_redshift_tracer():
     params = {
         "log_stellar_mass": np.array(10.0),
         "log_sfh_age_gyr": np.log(1.0),
-        "log_sfh_tau_gyr": np.log(0.5),
+        "log_sfh_tau_over_age": np.log(0.5),
         "gal_lgmet": np.array(-0.5),
-        "gal_lgmet_scatter": np.array(0.2),
+        "log_gal_lgmet_scatter": np.log(0.2),
     }
 
     def _host_sum(z_qso):
@@ -854,7 +927,7 @@ def test_qso_fsps_joint_model_custom_component_returns_jax_array():
         "tau_host": np.array(1.0),
         "fsps_weights_raw": np.array([0.0]),
         "gal_v_kms": np.array(0.0),
-        "gal_sigma_kms": np.array(100.0),
+        "log_gal_sigma_kms": np.log(100.0),
         "frac_jitter": np.array(0.0),
         "add_jitter": np.array(0.0),
         "custom_const_term_c0": np.array(0.5),
@@ -930,23 +1003,21 @@ def test_host_redshift_prior_params_disable_restores_zero_offset():
 def test_host_redshift_prior_penalizes_same_host_more_at_high_z():
     cfg = build_default_prior_config(np.array([1.0, 2.0, 3.0], dtype=float))
     cfg["host_redshift_prior"]["enabled"] = True
-    base = cfg["log_frac_host"]
     _, offset_low, scale_low, df_low = _host_redshift_prior_params(cfg, 0.2)
     _, offset_high, scale_high, df_high = _host_redshift_prior_params(cfg, 2.0)
 
     x = jnp.asarray(1.5)
-    logp_low = dist.StudentT(df=float(df_low), loc=float(base["loc"] + offset_low), scale=float(base["scale"] * scale_low)).log_prob(x)
-    logp_high = dist.StudentT(df=float(df_high), loc=float(base["loc"] + offset_high), scale=float(base["scale"] * scale_high)).log_prob(x)
+    logp_low = dist.StudentT(df=float(df_low), loc=float(offset_low), scale=float(scale_low)).log_prob(x)
+    logp_high = dist.StudentT(df=float(df_high), loc=float(offset_high), scale=float(scale_high)).log_prob(x)
 
     assert float(logp_high) < float(logp_low)
 
 
-def test_qso_fsps_joint_model_reports_host_redshift_prior_diagnostics():
+def test_qso_fsps_joint_model_derives_host_fraction_diagnostics():
     wave = np.linspace(2000.0, 6000.0, 32)
     flux = np.ones_like(wave)
     err = np.full_like(wave, 0.1)
     cfg = build_default_prior_config(flux)
-    cfg["host_redshift_prior"]["enabled"] = True
     cfg["host_sfh_model"] = "flexible"
 
     class _Grid:
@@ -961,7 +1032,7 @@ def test_qso_fsps_joint_model_reports_host_redshift_prior_diagnostics():
         "tau_host": np.array(1.0),
         "fsps_weights_raw": np.array([0.0]),
         "gal_v_kms": np.array(0.0),
-        "gal_sigma_kms": np.array(100.0),
+        "log_gal_sigma_kms": np.log(100.0),
         "frac_jitter": np.array(0.0),
         "add_jitter": np.array(0.0),
     }
@@ -987,11 +1058,8 @@ def test_qso_fsps_joint_model_reports_host_redshift_prior_diagnostics():
         z_qso=2.0,
     )
 
-    assert "host_redshift_prior_weight" in tr
-    assert "host_redshift_prior_loc_eff" in tr
-    assert "host_redshift_prior_scale_eff" in tr
-    assert "host_redshift_prior_df_eff" in tr
-    assert float(tr["host_redshift_prior_weight"]["value"]) > 0.99
-    assert np.isclose(float(tr["host_redshift_prior_loc_eff"]["value"]), -7.95, atol=0.05)
-    assert np.isclose(float(tr["host_redshift_prior_scale_eff"]["value"]), 0.11, atol=0.05)
-    assert np.isclose(float(tr["host_redshift_prior_df_eff"]["value"]), 19.9, atol=0.2)
+    assert "host_amp" in tr
+    assert "frac_host" in tr
+    assert "log_frac_host" in tr
+    assert tr["host_amp"]["type"] == "deterministic"
+    assert tr["log_frac_host"]["type"] == "sample"

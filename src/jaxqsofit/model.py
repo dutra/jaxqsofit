@@ -24,6 +24,7 @@ from jaxsedfit.host import (
 from .custom_components import (
     CustomComponentSpec,
     CustomLineComponentSpec,
+    custom_component_param_site,
     normalize_custom_components,
     normalize_custom_line_components,
 )
@@ -224,6 +225,28 @@ def negative_gaussian_bal_component(wave, params, metadata):
     return -depth * jnp.exp(-0.5 * jnp.abs(x) ** shape_power)
 
 
+def gaussian_bal_optical_depth_component(wave, params, metadata):
+    """BAL optical-depth profile parameterized by outflow velocity."""
+    line_lambda = jnp.asarray(metadata["line_lambda"], dtype=jnp.float64)
+    v_out = jnp.maximum(params["v_out"], 0.0)
+    center = line_lambda * (1.0 - v_out / C_KMS)
+    sigma = jnp.maximum(params["sigma"], 1e-3)
+    tau_peak = jnp.maximum(params["tau_peak"], 0.0)
+    shape_power = jnp.maximum(params.get("shape_power", 2.0), 2.0)
+    x = (wave - center) / sigma
+    return tau_peak * jnp.exp(-0.5 * jnp.abs(x) ** shape_power)
+
+
+def _is_multiplicative_bal_component(comp):
+    """Return True for built-in BAL components modeled as transmission."""
+    return str(getattr(comp, "metadata", {}).get("component_type", "")) == "bal_absorption"
+
+
+def _bal_covering_fraction(params):
+    """Return a bounded BAL covering fraction."""
+    return jnp.clip(jnp.asarray(params.get("covering", 1.0)), 0.0, 0.999)
+
+
 def _smc_like_reddening_jax(wave, a_uv, uv_ref=2500.0, alpha=1.2):
     """Return a smooth SMC-like attenuation curve.
 
@@ -379,6 +402,54 @@ def _cfg_norm_from_prior_config(prior_config, key):
     if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
         return jnp.asarray(cfg[0]), jnp.asarray(cfg[1])
     return jnp.asarray(cfg['loc']), jnp.asarray(cfg['scale'])
+
+
+def _sample_log_positive(prior_config, *, value_key, log_key, default_value, default_log_scale):
+    """Sample a positive parameter in log space and expose its physical value."""
+    cfg = prior_config.get(log_key, None)
+    if cfg is None:
+        legacy = prior_config.get(value_key, None)
+        if isinstance(legacy, dict):
+            dist_name = str(legacy.get("dist", "")).lower()
+            if dist_name in {"delta", "fixed", "deterministic"}:
+                value = jnp.asarray(legacy.get("value", legacy.get("loc", default_value)), dtype=jnp.float64)
+                return numpyro.deterministic(value_key, value)
+            if "loc" in legacy and "scale" in legacy and dist_name in {"normal", "gaussian"}:
+                cfg = {
+                    "dist": "normal",
+                    "loc": jnp.log(jnp.maximum(jnp.asarray(legacy["loc"], dtype=jnp.float64), 1.0e-30)),
+                    "scale": legacy["scale"],
+                }
+            elif "scale" in legacy:
+                cfg = {
+                    "dist": "normal",
+                    "loc": jnp.log(jnp.maximum(jnp.asarray(legacy["scale"], dtype=jnp.float64), 1.0e-30)),
+                    "scale": default_log_scale,
+                }
+        elif legacy is not None:
+            value = jnp.asarray(legacy, dtype=jnp.float64)
+            return numpyro.deterministic(value_key, value)
+    if cfg is None:
+        cfg = {"dist": "normal", "loc": np.log(default_value), "scale": default_log_scale}
+    dist_name = str(cfg.get("dist", "normal")).lower()
+    if dist_name in {"delta", "fixed", "deterministic"}:
+        log_value = jnp.asarray(cfg.get("value", cfg.get("loc", np.log(default_value))), dtype=jnp.float64)
+        value = jnp.exp(log_value)
+        numpyro.deterministic(log_key, log_value)
+        return numpyro.deterministic(value_key, value)
+    if dist_name in {"normal", "gaussian"}:
+        log_value = numpyro.sample(
+            log_key,
+            dist.Normal(jnp.asarray(cfg.get("loc", np.log(default_value))), jnp.asarray(cfg.get("scale", default_log_scale))),
+        )
+    elif dist_name == "uniform":
+        log_value = numpyro.sample(
+            log_key,
+            dist.Uniform(jnp.asarray(cfg.get("low", np.log(default_value) - 5.0)), jnp.asarray(cfg.get("high", np.log(default_value) + 5.0))),
+        )
+    else:
+        raise ValueError(f"{log_key} must use a Normal, Uniform, or Delta prior.")
+    return numpyro.deterministic(value_key, jnp.exp(log_value))
 
 
 def _template_grid_age_met_arrays(fsps_grid):
@@ -560,7 +631,7 @@ def _sample_from_prior_config(key, cfg):
 def _evaluate_custom_component_jax(wave, samples_or_values, comp, sample_value):
     """Evaluate one custom component from a sample/value mapping."""
     params = {
-        param_name: sample_value(samples_or_values, comp.site_name(param_name), default=0.0)
+        param_name: sample_value(samples_or_values, custom_component_param_site(comp, param_name), default=0.0)
         for param_name in comp.parameter_priors
     }
     return jnp.asarray(comp.evaluate(wave, params, comp.metadata), dtype=jnp.float64)
@@ -751,9 +822,6 @@ def reconstruct_posterior_components(
     n_use = n_total if n_draws is None else max(1, min(int(n_draws), n_total))
     sl = slice(0, n_use)
 
-    cont_norm = np.asarray(samples.get('cont_norm', np.zeros(n_total)), dtype=float)[sl]
-    log_frac_host = np.asarray(samples.get('log_frac_host', np.full(n_total, -np.inf)), dtype=float)[sl]
-    frac_host = 1.0 / (1.0 + np.exp(-log_frac_host))
     pl_norm = np.asarray(samples.get('PL_norm', np.zeros(n_total)), dtype=float)[sl]
     pl_slope = np.asarray(samples.get('PL_slope', np.zeros(n_total)), dtype=float)[sl]
     gal_v = np.asarray(samples.get('gal_v_kms', np.zeros(n_total)), dtype=float)[sl]
@@ -1007,9 +1075,16 @@ def build_tied_line_meta_from_linelist(linelist, wave):
     rows = []
     wmin = float(np.min(wave))
     wmax = float(np.max(wave))
+    ln_wmin = np.log(max(wmin, 1e-300))
+    ln_wmax = np.log(max(wmax, 1e-300))
+    support_nsigma = 5.0
     for row in records:
         lam = float(row['lambda'])
-        if lam > wmin and lam < wmax:
+        ln0 = np.log(max(lam, 1e-300))
+        voff = abs(float(row.get('voff', 0.0)))
+        sig_max = max(float(row.get('maxsig', row.get('inisig', 1e-5))), 1e-5)
+        ln_support = voff + support_nsigma * sig_max
+        if (ln0 + ln_support) >= ln_wmin and (ln0 - ln_support) <= ln_wmax:
             rows.append(row)
 
     ln_lambda0 = []
@@ -1030,7 +1105,10 @@ def build_tied_line_meta_from_linelist(linelist, wave):
     compnames = []
 
     for row in rows:
-        for i in range(int(row.get('ngauss', 1))):
+        ngauss = int(row.get('ngauss', 1))
+        linename = str(row.get('linename', f"line_{row['lambda']:.1f}"))
+        base_compname = str(row.get('compname', linename))
+        for i in range(ngauss):
             ln0 = np.log(float(row['lambda']))
             voff = float(row['voff'])
             dln = voff
@@ -1044,13 +1122,15 @@ def build_tied_line_meta_from_linelist(linelist, wave):
             sig_max.append(max(float(row['maxsig']), 1e-5))
             dmu_min.append(-dln)
             dmu_max.append(+dln)
-            linename = str(row.get('linename', f"line_{row['lambda']:.1f}"))
             names.append(f"{linename}_{i+1}")
             vindex.append(int(row['vindex']))
             windex.append(int(row['windex']))
             findex.append(int(row['findex']))
             fvalue.append(float(row['fvalue']))
-            compnames.append(str(row.get('compname', linename)))
+            if ngauss > 1:
+                compnames.append(f"{base_compname}:{linename}:{i + 1}")
+            else:
+                compnames.append(base_compname)
 
     ln_lambda0 = np.asarray(ln_lambda0, dtype=float)
     amp_init = np.asarray(amp_init, dtype=float)
@@ -1194,6 +1274,12 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     prior_config = {} if prior_config is None else prior_config
     custom_components = normalize_custom_components(custom_components)
     custom_line_components = normalize_custom_line_components(custom_line_components)
+    bal_absorption_components = tuple(
+        comp for comp in custom_components if _is_multiplicative_bal_component(comp)
+    )
+    additive_custom_components = tuple(
+        comp for comp in custom_components if not _is_multiplicative_bal_component(comp)
+    )
     use_psf_phot = (
         bool(use_psf_phot)
         and psf_mags is not None
@@ -1216,51 +1302,58 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             return jnp.asarray(cfg[0])
         return jnp.asarray(cfg)
 
-    # Continuum amplitude + host fraction parameterization
-    cont_norm = numpyro.sample('cont_norm', dist.LogNormal(*_cfg_norm('log_cont_norm')))
-    if isinstance(prior_config.get('log_frac_host', None), dict) and ('df' in prior_config['log_frac_host']):
-        log_frac_host_df = float(prior_config['log_frac_host']['df'])
-    else:
-        log_frac_host_df = float(prior_config.get('log_frac_host_df', 3.0))
-    if decompose_host:
+    host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
+    physical_delayed_host = (
+        decompose_host
+        and host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}
+        and getattr(fsps_grid, "host_basis_jax", None) is not None
+    )
+
+    if decompose_host and not physical_delayed_host:
+        cont_norm = numpyro.sample('cont_norm', dist.LogNormal(*_cfg_norm('log_cont_norm')))
+        if isinstance(prior_config.get('log_frac_host', None), dict) and ('df' in prior_config['log_frac_host']):
+            log_frac_host_df = float(prior_config['log_frac_host']['df'])
+        else:
+            log_frac_host_df = float(prior_config.get('log_frac_host_df', 3.0))
         log_frac_host_loc, log_frac_host_scale = _cfg_norm('log_frac_host')
         host_redshift_prior_weight, host_redshift_prior_loc_offset, host_redshift_prior_scale_mult, host_redshift_prior_df_eff = _host_redshift_prior_params(prior_config, z_qso)
         log_frac_host_loc_eff = log_frac_host_loc + host_redshift_prior_loc_offset
         log_frac_host_scale_eff = jnp.maximum(log_frac_host_scale * host_redshift_prior_scale_mult, 1e-6)
         log_frac_host_df_eff = jnp.asarray(log_frac_host_df) if host_redshift_prior_df_eff is None else jnp.maximum(host_redshift_prior_df_eff, 1e-6)
-        log_frac_host = numpyro.sample(
+        log_frac_host_sample = numpyro.sample(
             'log_frac_host',
             dist.StudentT(df=log_frac_host_df_eff, loc=log_frac_host_loc_eff, scale=log_frac_host_scale_eff),
         )
+        frac_host_sample = jax.nn.sigmoid(log_frac_host_sample)
         if emit_deterministics:
             numpyro.deterministic('host_redshift_prior_weight', host_redshift_prior_weight)
             numpyro.deterministic('host_redshift_prior_loc_eff', log_frac_host_loc_eff)
             numpyro.deterministic('host_redshift_prior_scale_eff', log_frac_host_scale_eff)
             numpyro.deterministic('host_redshift_prior_df_eff', log_frac_host_df_eff)
-        frac_host = jax.nn.sigmoid(log_frac_host)
+        host_amp = cont_norm * frac_host_sample
     else:
-        if emit_deterministics:
-            numpyro.deterministic('host_redshift_prior_weight', jnp.asarray(0.0))
-            numpyro.deterministic('host_redshift_prior_loc_eff', jnp.asarray(0.0))
-            numpyro.deterministic('host_redshift_prior_scale_eff', jnp.asarray(1.0))
-            numpyro.deterministic('host_redshift_prior_df_eff', jnp.asarray(float(log_frac_host_df)))
-        frac_host = jnp.asarray(0.0)
-    host_amp = cont_norm * frac_host
+        host_amp = jnp.asarray(jnp.nan)
+        log_frac_host_sample = jnp.asarray(jnp.nan)
+        frac_host_sample = jnp.asarray(jnp.nan)
     pl_pivot = _resolve_pl_pivot(wave, prior_config)
     if fit_pl:
         pl_norm = numpyro.sample('PL_norm', dist.HalfNormal(_cfg_halfnorm('PL_norm')))
         pl_slope_loc, pl_slope_scale = _cfg_norm('PL_slope')
         pl_slope = numpyro.sample('PL_slope', dist.Normal(pl_slope_loc, pl_slope_scale))
         reddening_a2500 = (
-            numpyro.sample('reddening_a2500', dist.HalfNormal(_cfg_halfnorm('reddening_a2500')))
+            _sample_log_positive(
+                prior_config,
+                value_key='reddening_a2500',
+                log_key='log_reddening_a2500',
+                default_value=0.1,
+                default_log_scale=1.0,
+            )
             if fit_reddening else jnp.asarray(0.0)
         )
     else:
         pl_norm = jnp.asarray(0.0)
         pl_slope = jnp.asarray(0.0)
         reddening_a2500 = jnp.asarray(0.0)
-        if decompose_host:
-            frac_host = jnp.asarray(1.0)
 
     if fit_fe:
         fe_uv_norm = numpyro.sample('Fe_uv_norm', dist.LogNormal(*_cfg_norm('log_Fe_uv_norm')))
@@ -1323,7 +1416,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     bc_model = bc_model_intrinsic * reddening_atten
     custom_models = {}
     custom_total_model = jnp.zeros_like(wave)
-    for comp in custom_components:
+    for comp in additive_custom_components:
         def _sample_value(sample_dict, key, default=0.0):
             """Sample one custom continuum-component parameter from prior config."""
             cfg = prior_config.get(key, None)
@@ -1380,7 +1473,6 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             log_lambda_llambda_agn[wave_lum] = jnp.asarray(jnp.nan)
     ntemp = fsps_grid.templates.shape[1]
     if decompose_host:
-        host_sfh_model = str(prior_config.get("host_sfh_model", "flexible")).lower()
         if host_sfh_model in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
             gal_intrinsic, fsps_weights, fsps_weights_frac = _delayed_sfh_host_spectrum(
                 fsps_grid,
@@ -1399,7 +1491,13 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         else:
             raise ValueError("host_sfh_model must be one of: 'flexible', 'delayed'.")
         gal_v_kms = numpyro.sample('gal_v_kms', dist.Normal(*_cfg_norm('gal_v_kms')))
-        gal_sigma_kms = numpyro.sample('gal_sigma_kms', dist.HalfNormal(_cfg_halfnorm('gal_sigma_kms')))
+        gal_sigma_kms = _sample_log_positive(
+            prior_config,
+            value_key='gal_sigma_kms',
+            log_key='log_gal_sigma_kms',
+            default_value=150.0,
+            default_log_scale=0.4,
+        )
         gal_model_intrinsic = _shift_and_broaden_single_spectrum_lnlam(lnwave, gal_intrinsic, gal_v_kms, gal_sigma_kms)
     else:
         fsps_weights_frac = jnp.zeros((ntemp,))
@@ -1409,6 +1507,8 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     custom_line_models = {}
     custom_line_broad_intrinsic = jnp.zeros_like(wave)
     custom_line_narrow_intrinsic = jnp.zeros_like(wave)
+    line_component_profiles = jnp.zeros((0, wave.shape[0]), dtype=wave.dtype)
+    line_component_broad_mask = jnp.zeros((0,), dtype=wave.dtype)
     for comp in custom_line_components:
         def _sample_line_value(sample_dict, key, default=0.0):
             """Sample one custom line-component parameter from prior config."""
@@ -1497,11 +1597,14 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         sigs = sig_group[wgroup]
         amps = amp_group[fgroup] * _line_meta_array(tied_line_meta, 'flux_ratio', jax_key='flux_ratio_jax')
         mus = tied_line_meta['ln_lambda0'] + dmu
+        line_component_broad_mask = _line_meta_array(tied_line_meta, 'broad_mask', jax_key='broad_mask_jax')
+        line_component_profiles = amps[:, None] * jnp.exp(
+            -0.5 * ((lnwave[None, :] - mus[:, None]) / sigs[:, None]) ** 2
+        )
 
         if line_components_are_split:
-            broad_mask = _line_meta_array(tied_line_meta, 'broad_mask', jax_key='broad_mask_jax')
-            line_model_broad_intrinsic = _many_gauss_lnlam(lnwave, amps * broad_mask, mus, sigs)
-            line_model_narrow_intrinsic = _many_gauss_lnlam(lnwave, amps * (1.0 - broad_mask), mus, sigs)
+            line_model_broad_intrinsic = _many_gauss_lnlam(lnwave, amps * line_component_broad_mask, mus, sigs)
+            line_model_narrow_intrinsic = _many_gauss_lnlam(lnwave, amps * (1.0 - line_component_broad_mask), mus, sigs)
             line_model_broad_intrinsic = line_model_broad_intrinsic + custom_line_broad_intrinsic
             line_model_narrow_intrinsic = line_model_narrow_intrinsic + custom_line_narrow_intrinsic
             line_model_intrinsic = line_model_broad_intrinsic + line_model_narrow_intrinsic
@@ -1522,6 +1625,11 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     line_model_broad = line_model_broad_intrinsic * reddening_atten
     line_model_narrow = line_model_narrow_intrinsic
     line_model = line_model_broad + line_model_narrow if line_components_are_split else line_model_intrinsic
+    if line_component_profiles.shape[0] > 0:
+        line_component_profiles = line_component_profiles * (
+            line_component_broad_mask[:, None] * reddening_atten[None, :]
+            + (1.0 - line_component_broad_mask[:, None])
+        )
     custom_line_models = {
         comp.output_name: custom_line_models[comp.output_name]
         * (reddening_atten if comp.line_kind == 'broad' else 1.0)
@@ -1535,7 +1643,69 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             line_model = line_model_broad + line_model_narrow
         else:
             line_model = line_model * poly_model
+        line_component_profiles = line_component_profiles * poly_model[None, :]
         custom_line_models = {name: model * poly_model for name, model in custom_line_models.items()}
+
+    if bal_absorption_components:
+        bal_reference = agn_model + line_model_broad
+        bal_transmission = jnp.ones_like(wave)
+        bal_param_cache = {}
+        for comp in bal_absorption_components:
+            def _sample_bal_value(sample_dict, key, default=0.0):
+                """Sample one BAL absorption parameter from prior config."""
+                if key in bal_param_cache:
+                    return bal_param_cache[key]
+                cfg = prior_config.get(key, None)
+                if cfg is None:
+                    return default
+                value = _sample_from_prior_config(key, cfg)
+                bal_param_cache[key] = value
+                return value
+
+            bal_params = {
+                param_name: _sample_bal_value(
+                    prior_config,
+                    custom_component_param_site(comp, param_name),
+                    default=0.0,
+                )
+                for param_name in comp.parameter_priors
+            }
+            tau_profile = jnp.asarray(comp.evaluate(wave, bal_params, comp.metadata), dtype=jnp.float64)
+            covering = _bal_covering_fraction(bal_params)
+            component_transmission = 1.0 - covering * (1.0 - jnp.exp(-tau_profile))
+            component_transmission = jnp.clip(component_transmission, 1.0e-6, 1.0)
+            custom_models[comp.output_name] = bal_reference * (component_transmission - 1.0)
+            bal_transmission = bal_transmission * component_transmission
+
+        bal_transmission = jnp.clip(bal_transmission, 1.0e-6, 1.0)
+        agn_model = agn_model * bal_transmission
+        line_model_broad = line_model_broad * bal_transmission
+        line_model = line_model_broad + line_model_narrow if line_components_are_split else line_model * bal_transmission
+        if line_component_profiles.shape[0] > 0:
+            line_component_profiles = line_component_profiles * (
+                line_component_broad_mask[:, None] * bal_transmission[None, :]
+                + (1.0 - line_component_broad_mask[:, None])
+            )
+        custom_line_models = {
+            comp.output_name: custom_line_models[comp.output_name]
+            * (bal_transmission if comp.line_kind == 'broad' else 1.0)
+            for comp in custom_line_components
+        }
+
+    if decompose_host and not physical_delayed_host:
+        frac_host = frac_host_sample
+        log_frac_host = log_frac_host_sample
+        host_amp_out = host_amp
+    elif decompose_host:
+        host_ref = jnp.abs(jnp.interp(pl_pivot, wave, gal_model, left=0.0, right=0.0))
+        agn_ref = jnp.abs(jnp.interp(pl_pivot, wave, agn_model, left=0.0, right=0.0))
+        frac_host = jnp.clip(host_ref / jnp.maximum(host_ref + agn_ref, 1.0e-30), 1.0e-12, 1.0 - 1.0e-12)
+        log_frac_host = jnp.log(frac_host) - jnp.log1p(-frac_host)
+        host_amp_out = jnp.where(jnp.isfinite(host_amp), host_amp, host_ref)
+    else:
+        frac_host = jnp.asarray(0.0)
+        log_frac_host = jnp.asarray(-jnp.inf)
+        host_amp_out = jnp.asarray(0.0)
 
     frac_jitter = numpyro.sample('frac_jitter', dist.HalfNormal(_cfg_halfnorm('frac_jitter')))
     add_jitter = numpyro.sample('add_jitter', dist.HalfNormal(_cfg_halfnorm('add_jitter', ref_scale=jnp.mean(err))))
@@ -1553,6 +1723,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
     line_model_broad_psf = line_model_broad
     line_model_narrow_psf = line_model_narrow
     line_model_psf = line_model_broad_psf + line_model_narrow_psf
+    line_component_profiles_psf = line_component_profiles
     psf_model = agn_model_psf + gal_model_psf + line_model_psf
     if use_psf_phot:
         delta_m_psf = numpyro.sample('delta_m_psf_raw', dist.Normal(0.0, 0.5))
@@ -1564,6 +1735,11 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         line_model_broad_psf = scale_psf * line_model_broad
         line_model_narrow_psf = scale_psf * eta_psf * line_model_narrow
         line_model_psf = line_model_broad_psf + line_model_narrow_psf
+        if line_component_profiles.shape[0] > 0:
+            line_component_profiles_psf = line_component_profiles * scale_psf * (
+                line_component_broad_mask[:, None]
+                + eta_psf * (1.0 - line_component_broad_mask[:, None])
+            )
         psf_model = agn_model_psf + gal_model_psf + line_model_psf
 
         wave_obs = wave * (1.0 + z_qso)
@@ -1577,6 +1753,11 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
             sig = jnp.sqrt(psf_mag_errs[i] ** 2 + sigma_phot_extra ** 2)
             numpyro.sample(f'psf_mag_obs_{i}', dist.Normal(m_syn, sig), obs=psf_mags[i])
 
+    if emit_deterministics:
+        numpyro.deterministic('host_amp', host_amp_out)
+        if physical_delayed_host:
+            numpyro.deterministic('log_frac_host', log_frac_host)
+        numpyro.deterministic('frac_host', frac_host)
     if emit_deterministics and not (fit_pl and fit_reddening):
         numpyro.deterministic('reddening_a2500', reddening_a2500)
     if emit_deterministics:
@@ -1597,6 +1778,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         numpyro.deterministic('line_model_intrinsic', line_model_intrinsic)
         numpyro.deterministic('line_model_broad', line_model_broad)
         numpyro.deterministic('line_model_narrow', line_model_narrow)
+        numpyro.deterministic('line_component_profiles', line_component_profiles)
         numpyro.deterministic('line_model', line_model)
         numpyro.deterministic('continuum_model', continuum_model)
         numpyro.deterministic('model', model)
@@ -1607,9 +1789,9 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
         numpyro.deterministic('gal_model_psf', gal_model_psf)
         numpyro.deterministic('line_model_broad_psf', line_model_broad_psf)
         numpyro.deterministic('line_model_narrow_psf', line_model_narrow_psf)
+        numpyro.deterministic('line_component_profiles_psf', line_component_profiles_psf)
         numpyro.deterministic('line_model_psf', line_model_psf)
         numpyro.deterministic('psf_model', psf_model)
-        numpyro.deterministic('frac_host', frac_host)
         for wave_lum, log_lambda_llambda_lum in log_lambda_llambda_agn.items():
             wave_label = _format_wave_label(wave_lum)
             numpyro.deterministic(

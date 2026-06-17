@@ -7,7 +7,7 @@ import numpy as np
 
 from .config import PriorConfig
 from .custom_components import CustomComponentSpec, make_custom_component
-from .model import negative_gaussian_bal_component
+from .model import gaussian_bal_optical_depth_component
 
 MINSCA_DEFAULT = 0.0
 MAXSCA_DEFAULT = 1e10
@@ -113,6 +113,100 @@ def _lnlam_peak_ratio_for_flux_ratio(
     return flux_ratio * denominator_lam / numerator_lam
 
 
+"""
+Default line-prior table.
+
+Each row below defines one emission-line prior in the same plain-dict schema
+accepted by notebook line configs. The table is converted into NumPy/JAX
+metadata by ``build_tied_line_meta_from_linelist`` before sampling.
+
+Coordinate system
+-----------------
+``lambda`` is the rest-frame vacuum wavelength in Angstroms. The Gaussian
+model itself is evaluated in ln(lambda), not linear wavelength. Consequently,
+``inisig``, ``minsig``, and ``maxsig`` are Gaussian widths in ln(lambda). For
+small widths, these are approximately velocity widths divided by c. For
+example, ``sigma_ln_lambda = 0.001`` corresponds to roughly 300 km/s Gaussian
+sigma, or about 700 km/s FWHM.
+
+Amplitude and width fields
+--------------------------
+``inisca``, ``minsca``, and ``maxsca`` are priors on the Gaussian peak
+amplitude. They are not integrated line fluxes. The integrated flux of a
+single Gaussian in linear wavelength scales approximately as
+peak_amplitude * sigma_ln_lambda * lambda0. This matters for fixed doublet
+ratios: the helper ``_lnlam_peak_ratio_for_flux_ratio`` converts an intended
+integrated-flux ratio into the peak-amplitude ratio required by the ln-lambda
+Gaussian model, assuming the tied components share the same width.
+
+``inisig``, ``minsig``, and ``maxsig`` define the prior for the Gaussian
+ln-lambda width group. If multiple rows share a nonzero ``windex`` within the
+same component complex, they share one sampled width. If ``windex`` is zero,
+the row is not tied to other rows by width.
+
+Velocity offsets: ``voff`` and ``vindex``
+----------------------------------------
+``voff`` is the allowed absolute center shift in ln(lambda): the sampled
+center offset is constrained to ``[-voff, +voff]`` around ``log(lambda)``.
+For small offsets this is approximately a velocity range of ``voff * c``.
+
+``vindex`` controls tied velocity shifts. Rows with the same positive
+``vindex`` within the same component complex share one sampled center offset.
+Rows with ``vindex=0`` are independent. This follows the PyQSOFit convention
+that only nonzero tie indices are constraints, but jaxqsofit additionally
+scopes the tie by component complex to avoid accidental cross-complex tying
+when the same integer is reused in different wavelength regions.
+
+Width ties: ``windex``
+---------------------
+``windex`` works like ``vindex``, but for Gaussian width. Rows with the same
+positive ``windex`` within the same component complex share one sampled
+``sigma_ln_lambda``. Rows with ``windex=0`` are independent. This is commonly
+used for physically related doublets or narrow-line complexes whose velocity
+widths should match.
+
+Amplitude/flux-ratio ties: ``findex`` and ``fvalue``
+---------------------------------------------------
+PyQSOFit documents this rule as: entries with the same nonzero ``findex`` have
+constrained flux ratios. In this implementation, the same convention is used
+with two precise details:
+
+1. Only positive ``findex`` values tie rows together. ``findex=0`` means the
+   row gets its own independent amplitude group.
+2. Ties are local to the component complex, represented internally by
+   ``compname``. The same positive ``findex`` can therefore be reused in
+   different complexes without coupling unrelated lines such as Ha and Hb.
+
+Within each tied amplitude group, one sampled peak-amplitude parameter is
+created. Each component's peak amplitude is then
+``line_amp_group[fgroup] * flux_ratio``, where ``flux_ratio`` is derived from
+that row's ``fvalue`` relative to the first row in the group. Thus ``fvalue``
+sets the fixed relative peak amplitude inside a tied group. For equal
+ln-lambda widths, choosing ``fvalue`` with
+``_lnlam_peak_ratio_for_flux_ratio`` enforces the desired integrated-flux
+ratio.
+
+For untied rows with ``findex=0``, ``fvalue`` is not a fixed flux ratio. It is
+only the initial/default amplitude scale used to seed that independent
+amplitude group's prior.
+
+Multiple Gaussians: ``ngauss``
+-----------------------------
+``ngauss`` expands one row into multiple Gaussian components with names like
+``CIV_br_1``, ``CIV_br_2``, etc. Each expanded Gaussian is intentionally given
+an independent internal tie label, so a broad-line row with ``ngauss > 1`` does
+not accidentally force all copies to have the same velocity, width, and
+amplitude. If a genuinely tied multi-component structure is needed, write the
+components as explicit rows with shared positive tie indices.
+
+Line naming and plotting
+------------------------
+``linename`` is the output component name used in model metadata and plots.
+The current plotting convention classifies names containing ``"_br"`` as
+broad-line components and other built-in line names as narrow components.
+``compname`` is used for grouping/tie scoping by line complex; it is not just a
+display label.
+"""
 # Default line table in plain dict rows (same schema as notebook line config).
 DEFAULT_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     # Halpha complex
@@ -152,18 +246,18 @@ DEFAULT_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     # CIV complex
     _line_row(lam=1549.06, compname='CIV', minwav=1500, maxwav=1700, linename='CIV_br', ngauss=3, inisig=inisig_uv_broad, minsig=0.001, maxsig=maxsig_uv_broad, voff=voff_uv_broad, vindex=0, windex=0, findex=0, fvalue=0.05),
     _line_row(lam=1549.06, compname='CIV', minwav=1500, maxwav=1700, linename='CIV_na', inisig=inisig_narrow_relaxed, minsig=minsig_narrow_relaxed, maxsig=0.002, voff=voff_narrow, vindex=1, windex=1, findex=0, fvalue=0.002),
-    _line_row(lam=1640.42, compname='CIV', minwav=1500, maxwav=1700, linename='HeII1640', inisig=inisig_narrow_relaxed, minsig=minsig_narrow_relaxed, maxsig=0.002, voff=voff_elg_red, vindex=1, windex=1, findex=0, fvalue=0.002),
     _line_row(lam=1663.48, compname='CIV', minwav=1500, maxwav=1700, linename='OIII1663', inisig=inisig_narrow_relaxed, minsig=minsig_narrow_relaxed, maxsig=0.002, voff=voff_elg_red, vindex=1, windex=1, findex=0, fvalue=0.002),
-    _line_row(lam=1640.42, compname='CIV', minwav=1500, maxwav=1700, linename='HeII1640_br', inisig=inisig_uv_broad, minsig=0.0025, maxsig=0.02, voff=voff_elg_red, vindex=2, windex=2, findex=0, fvalue=0.002),
     _line_row(lam=1663.48, compname='CIV', minwav=1500, maxwav=1700, linename='OIII1663_br', inisig=inisig_uv_broad, minsig=0.0025, maxsig=0.02, voff=voff_elg_red, vindex=2, windex=2, findex=0, fvalue=0.002),
+    _line_row(lam=1640.42, compname='CIV', minwav=1500, maxwav=1700, linename='HeII1640', inisig=inisig_narrow_relaxed, minsig=minsig_narrow_relaxed, maxsig=0.002, voff=voff_elg_red, vindex=1, windex=1, findex=0, fvalue=0.002),
+    _line_row(lam=1640.42, compname='CIV', minwav=1500, maxwav=1700, linename='HeII1640_br', inisig=inisig_uv_broad, minsig=0.0025, maxsig=0.02, voff=voff_elg_red, vindex=2, windex=2, findex=0, fvalue=0.002),
     # SiIV complex
-    _line_row(lam=1402.06, compname='SiIV', minwav=1290, maxwav=1450, linename='SiIV_OIV1', inisig=inisig_uv_broad, minsig=minsig_uv_broad, maxsig=maxsig_uv_broad, voff=voff_uv_broad, vindex=1, windex=1, findex=0, fvalue=0.05),
-    _line_row(lam=1396.76, compname='SiIV', minwav=1290, maxwav=1450, linename='SiIV_OIV2', inisig=inisig_uv_broad, minsig=minsig_uv_broad, maxsig=maxsig_uv_broad, voff=voff_uv_broad, vindex=1, windex=1, findex=0, fvalue=0.05),
+    _line_row(lam=1402.06, compname='SiIV', minwav=1290, maxwav=1450, linename='SiIV_OIV1_br', inisig=inisig_uv_broad, minsig=minsig_uv_broad, maxsig=maxsig_uv_broad, voff=voff_uv_broad, vindex=1, windex=1, findex=0, fvalue=0.05),
+    _line_row(lam=1396.76, compname='SiIV', minwav=1290, maxwav=1450, linename='SiIV_OIV2_br', inisig=inisig_uv_broad, minsig=minsig_uv_broad, maxsig=maxsig_uv_broad, voff=voff_uv_broad, vindex=1, windex=1, findex=0, fvalue=0.05),
     _line_row(lam=1335.30, compname='SiIV', minwav=1290, maxwav=1450, linename='CII1335', inisig=inisig_nv, minsig=minsig_nv, maxsig=0.015, voff=voff_narrow, vindex=2, windex=2, findex=0, fvalue=0.001),
     _line_row(lam=1304.35, compname='SiIV', minwav=1290, maxwav=1450, linename='OI1304', inisig=inisig_nv, minsig=minsig_nv, maxsig=0.015, voff=voff_narrow, vindex=2, windex=2, findex=0, fvalue=0.001),
     # Lya complex
     _line_row(lam=1215.67, compname='Lya', minwav=1150, maxwav=1290, linename='Lya_br', ngauss=3, inisig=inisig_uv_broad, minsig=minsig_uv_broad, maxsig=maxsig_uv_broad, voff=voff_lya, vindex=0, windex=0, findex=0, fvalue=0.05),
-    _line_row(lam=1240.14, compname='Lya', minwav=1150, maxwav=1290, linename='NV1240', inisig=inisig_nv, minsig=minsig_nv, maxsig=maxsig_nv, voff=voff_nv, vindex=0, windex=0, findex=0, fvalue=0.002),
+    _line_row(lam=1240.14, compname='Lya', minwav=1150, maxwav=1290, linename='NV1240_br', inisig=inisig_nv, minsig=minsig_nv, maxsig=maxsig_nv, voff=voff_nv, vindex=0, windex=0, findex=0, fvalue=0.002),
 ]
 
 DEFAULT_LINE_CONFIG: Dict[str, Any] = {
@@ -290,37 +384,41 @@ def _append_unique_by_wavelength(
 
 def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec, ...]:
     """Return built-in BAL custom components with flux-scaled depth priors."""
-    f = np.asarray(flux, dtype=float)
-    finite = np.isfinite(f)
-    fscale = float(np.nanmedian(np.abs(f[finite]))) if np.any(finite) else 1.0
-    if not np.isfinite(fscale) or fscale <= 0:
-        fscale = 1.0
-
     def _bal_component(
         name: str,
-        depth_frac: float,
-        center: float,
-        scale: float,
-        low: float,
-        high: float,
+        tau_scale: float,
+        line_lambda: float,
+        v_out_loc: float,
+        v_out_scale: float,
+        v_out_low: float,
+        v_out_high: float,
         sigma: float,
         sigma_scale: float = 0.35,
+        covering_loc: float = 0.55,
+        covering_scale: float = 0.2,
+        covering_high: float = 0.90,
     ):
-        """Build one negative-Gaussian BAL custom component spec."""
+        """Build one multiplicative BAL optical-depth component spec."""
         return make_custom_component(
             name=name,
             parameter_priors={
-                # Keep a zero-centered shrinkage prior, but with a broader scale so
-                # moderate-to-deep troughs are still available when the data support them.
-                "depth": {"dist": "HalfNormal", "scale": max(8.0 * depth_frac * fscale, 1e-6)},
-                "center": {
-                    # Force BAL trough centers to remain on the blue side of the
-                    # corresponding broad emission line.
+                "tau_peak": {"dist": "HalfNormal", "scale": float(tau_scale)},
+                "covering": {
                     "dist": "TruncatedNormal",
-                    "loc": float(center),
-                    "scale": float(scale),
-                    "low": float(low),
-                    "high": float(high),
+                    "loc": float(covering_loc),
+                    "scale": float(covering_scale),
+                    "low": 0.0,
+                    "high": float(covering_high),
+                },
+                "v_out": {
+                    # The center is computed as lambda0 * (1 - v_out / c), so
+                    # positive v_out values force absorption blueward of the
+                    # associated transition.
+                    "dist": "TruncatedNormal",
+                    "loc": float(v_out_loc),
+                    "scale": float(v_out_scale),
+                    "low": float(v_out_low),
+                    "high": float(v_out_high),
                 },
                 "sigma": {"dist": "LogNormal", "loc": np.log(float(sigma)), "scale": float(sigma_scale)},
                 "shape_power": {
@@ -331,24 +429,30 @@ def build_default_bal_components(flux: np.ndarray) -> tuple[CustomComponentSpec,
                     "high": 12.0,
                 },
             },
-            evaluate=negative_gaussian_bal_component,
+            evaluate=gaussian_bal_optical_depth_component,
+            metadata={
+                "component_type": "bal_absorption",
+                "line_lambda": float(line_lambda),
+                "shared_parameter_sites": {"v_out": "custom_bal_v_out"},
+            },
         )
 
     # Trump et al. (2006)
     return (
-        _bal_component("bal_nv", depth_frac=0.04, center=1200.0, scale=70.0, low=1120.0, high=1240.0, sigma=22.0),
+        _bal_component("bal_nv", tau_scale=0.8, line_lambda=1240.14, v_out_loc=6000.0, v_out_scale=2500.0, v_out_low=3000.0, v_out_high=12000.0, sigma=22.0),
         # _bal_component("bal_nv_2", depth_frac=0.025, center=1160.0, scale=90.0, low=1100.0, high=1240.0, sigma=40.0),
-        _bal_component("bal_siiv", depth_frac=0.04, center=1350.0, scale=70.0, low=1280.0, high=1397.0, sigma=22.0),
+        _bal_component("bal_siiv", tau_scale=0.8, line_lambda=1396.76, v_out_loc=6000.0, v_out_scale=2500.0, v_out_low=3000.0, v_out_high=12000.0, sigma=22.0),
         # _bal_component("bal_siiv_2", depth_frac=0.025, center=1320.0, scale=90.0, low=1260.0, high=1397.0, sigma=40.0),
-        _bal_component("bal_civ", depth_frac=0.05, center=1500.0, scale=80.0, low=1400.0, high=1549.0, sigma=24.0),
+        _bal_component("bal_civ", tau_scale=1.0, line_lambda=1549.06, v_out_loc=6000.0, v_out_scale=2500.0, v_out_low=3000.0, v_out_high=12000.0, sigma=24.0),
         # _bal_component("bal_civ_2", depth_frac=0.03, center=1450.0, scale=100.0, low=1350.0, high=1549.0, sigma=45.0),
-        _bal_component("bal_ciii", depth_frac=0.03, center=1850.0, scale=80.0, low=1750.0, high=1909.0, sigma=30.0),
+        # not common, often blended with other lines
+        # _bal_component("bal_ciii", tau_scale=0.8, line_lambda=1908.73, v_out_loc=9200.0, v_out_scale=8000.0, v_out_low=300.0, v_out_high=25000.0, sigma=30.0),
         # _bal_component("bal_ciii_2", depth_frac=0.02, center=1800.0, scale=100.0, low=1700.0, high=1909.0, sigma=50.0),
-        # Fe ??
-        _bal_component("bal_fe1", depth_frac=0.03, center=2000.0, scale=80.0, low=1950.0, high=2050.0, sigma=30.0),
-        _bal_component("bal_fe2", depth_frac=0.03, center=2200.0, scale=80.0, low=2150.0, high=2250.0, sigma=30.0),
-        #
-        _bal_component("bal_mgii", depth_frac=0.03, center=2798.0, scale=120.0, low=2750.0, high=2798.0, sigma=40.0),
+        # Fe absorption, not common
+        # _bal_component("bal_fe1", tau_scale=0.8, line_lambda=2050.0, v_out_loc=7300.0, v_out_scale=8000.0, v_out_low=300.0, v_out_high=15000.0, sigma=30.0),
+        # _bal_component("bal_fe2", tau_scale=0.8, line_lambda=2250.0, v_out_loc=6600.0, v_out_scale=8000.0, v_out_low=300.0, v_out_high=13000.0, sigma=30.0),
+        # not common
+        # _bal_component("bal_mgii", tau_scale=0.8, line_lambda=2798.75, v_out_loc=5000.0, v_out_scale=7000.0, v_out_low=300.0, v_out_high=5200.0, sigma=40.0),
         # _bal_component("bal_mgii_2", depth_frac=0.02, center=2760.0, scale=120.0, low=2700.0, high=2798.0, sigma=55.0),
     )
 
@@ -381,10 +485,11 @@ def build_default_prior_config(
 
     Notes
     -----
-    ``reddening_a2500`` controls the amplitude of the built-in SMC-like
-    attenuation curve. Because the curve is normalized to unity at
-    ``reddening_uv_ref`` (2500 Angstrom by default), this parameter is
-    :math:`A(2500)` in magnitudes rather than literal ``E(B-V)``.
+    ``log_reddening_a2500`` controls the amplitude of the built-in SMC-like
+    attenuation curve in log space. Because the curve is normalized to unity
+    at ``reddening_uv_ref`` (2500 Angstrom by default), the transformed
+    ``reddening_a2500`` value is :math:`A(2500)` in magnitudes rather than
+    literal ``E(B-V)``.
     """
     f = np.asarray(flux, dtype=float)
     finite = np.isfinite(f)
@@ -401,7 +506,7 @@ def build_default_prior_config(
         "PL_slope": {"dist": "Normal", "loc": -1.5, "scale": 0.4},
         "PL_pivot": None if pl_pivot is None else float(pl_pivot),
         "poly_pivot": None,
-        "reddening_a2500": {"dist": "HalfNormal", "scale": 0.3},
+        "log_reddening_a2500": {"dist": "Normal", "loc": np.log(0.1), "scale": 0.6},
         "reddening_uv_ref": 2500.0,
         "reddening_alpha": 1.2,
         "log_frac_host": {"dist": "StudentT", "loc": 0.0, "scale": 2.0, "df": 3.0},
@@ -421,9 +526,9 @@ def build_default_prior_config(
         "log_stellar_mass": {"dist": "TruncatedNormal", "loc": 9.0, "scale": 0.75, "low": 7.0, "high": 12.0},
         "log_host_aperture_scale": {"dist": "Normal", "loc": 0.0, "scale": 0.5},
         "log_sfh_age_gyr": {"dist": "Normal", "loc": np.log(3.0), "scale": 1.0},
-        "log_sfh_tau_gyr": {"dist": "Normal", "loc": np.log(1.0), "scale": 1.0},
+        "log_sfh_tau_over_age": {"dist": "Normal", "loc": 0.0, "scale": 0.5},
         "gal_lgmet": {"dist": "Normal", "loc": 0.0, "scale": 0.5},
-        "gal_lgmet_scatter": {"dist": "HalfNormal", "scale": 0.2},
+        "log_gal_lgmet_scatter": {"dist": "Normal", "loc": np.log(0.15), "scale": 0.7},
         "mass_metallicity_relation": {
             "enabled": False,
             "pivot_mass": 10.0,
@@ -434,7 +539,7 @@ def build_default_prior_config(
             "max": 0.3,
         },
         "gal_v_kms": {"dist": "Normal", "loc": 0.0, "scale": 120.0},
-        "gal_sigma_kms": {"dist": "HalfNormal", "scale": 200.0},
+        "log_gal_sigma_kms": {"dist": "Normal", "loc": np.log(150.0), "scale": 0.4},
         "log_Fe_uv_norm": {"dist": "LogNormal", "loc": np.log(max(0.03 * fscale, 1e-12)), "scale": 1.0},
         "log_Fe_op_over_uv": {"dist": "Normal", "loc": 0.0, "scale": 1.0},
         "log_Fe_uv_FWHM": {"dist": "LogNormal", "loc": np.log(3000.0), "scale": 0.5},
