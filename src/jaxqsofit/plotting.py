@@ -786,8 +786,23 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
 
     ax.set_xlim(fitter.wave.min(), fitter.wave.max())
     if ylims is None:
-        yvals = _finite_component_values(
-            fitter.flux,
+        robust_data_ylim = []
+        for data_arr in (fitter.flux_prereduced, fitter.flux):
+            data_arr = np.asarray(data_arr, dtype=float)
+            finite = data_arr[np.isfinite(data_arr)]
+            if finite.size == 0:
+                continue
+            lo, hi = np.nanpercentile(finite, [0.5, 99.9])
+            med = float(np.nanmedian(finite))
+            mad = float(1.4826 * np.nanmedian(np.abs(finite - med)))
+            if np.isfinite(mad) and mad > 0.0:
+                lo = max(float(lo), med - 10.0 * mad)
+                hi = min(float(hi), med + 10.0 * mad)
+            else:
+                lo = hi = med
+            robust_data_ylim.append(np.asarray([lo, hi], dtype=float))
+
+        component_ylim_arrays = [
             total_model_plot,
             host_plot,
             pl_plot,
@@ -797,12 +812,42 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             line_plot,
             *[model for _, model in custom_components],
             *[model for _, model in custom_line_components],
+        ]
+        if plot_1sigma and pred_bands:
+            for key in ('total_model', 'host', 'PL', 'FeII', 'Balmer_cont', 'lines'):
+                if key not in pred_bands:
+                    continue
+                lo, hi = pred_bands[key]
+                if len(lo) != len(fitter.wave) or len(hi) != len(fitter.wave):
+                    continue
+                mid = 0.5 * (np.asarray(lo, dtype=float) + np.asarray(hi, dtype=float))
+                if _show_component(mid):
+                    component_ylim_arrays.extend([lo, hi])
+            for name, model in custom_components + custom_line_components:
+                if name not in pred_bands or not _show_component(model):
+                    continue
+                lo, hi = pred_bands[name]
+                if len(lo) == len(fitter.wave) and len(hi) == len(fitter.wave):
+                    component_ylim_arrays.extend([lo, hi])
+            if bool(plot_intrinsic_powerlaw) and 'PL_intrinsic' in pred_bands:
+                lo, hi = pred_bands['PL_intrinsic']
+                if len(lo) == len(fitter.wave) and len(hi) == len(fitter.wave):
+                    mid = 0.5 * (np.asarray(lo, dtype=float) + np.asarray(hi, dtype=float))
+                    if _show_component(mid):
+                        component_ylim_arrays.extend([lo, hi])
+        yvals = _finite_component_values(
+            *robust_data_ylim,
+            *component_ylim_arrays,
         )
         if yvals:
             yplot = np.concatenate(yvals)
-            ymin, ymax = np.nanpercentile(yplot, [1, 99])
-            if np.isfinite(ymin) and np.isfinite(ymax) and ymax > ymin:
-                pad = 0.15 * (ymax - ymin)
+            ymin = float(np.nanmin(yplot))
+            ymax = float(np.nanmax(yplot))
+            if np.isfinite(ymin) and np.isfinite(ymax):
+                if ymax > ymin:
+                    pad = 0.10 * (ymax - ymin)
+                else:
+                    pad = max(0.1 * abs(ymax), 1.0)
                 ax.set_ylim(float(ymin - pad), float(ymax + pad))
     else:
         ax.set_ylim(ylims[0], ylims[1])
